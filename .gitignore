@@ -1,0 +1,15 @@
+.venv/
+.env
+*.db
+__pycache__/
+.pytest_cache/
+.postgres/
+.postgres-admin-password
+.env.production
+deploy/certs/*.crt
+deploy/certs/*.pem
+artifacts/
+node_modules/
+playwright-report/
+test-results/
+deploy/geoip/*.mmdb

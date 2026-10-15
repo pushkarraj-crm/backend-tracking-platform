@@ -1,0 +1,395 @@
+import uuid
+from datetime import datetime, timezone
+from decimal import Decimal
+from sqlalchemy import (
+    String,
+    ForeignKey,
+    ForeignKeyConstraint,
+    UniqueConstraint,
+    Index,
+    Numeric,
+    DateTime,
+    Boolean,
+    Integer,
+    Text,
+    CheckConstraint,
+    JSON,
+    text,
+)
+from sqlalchemy.orm import Mapped, mapped_column
+from .db import Base
+
+
+def identifier():
+    return uuid.uuid4().hex
+
+
+def now():
+    return datetime.now(timezone.utc)
+
+
+class Workspace(Base):
+    __tablename__ = "workspaces"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=identifier)
+    name: Mapped[str] = mapped_column(String(120))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    plan: Mapped[str] = mapped_column(String(20), default="trial", server_default="trial")
+    subscription_status: Mapped[str] = mapped_column(
+        String(20), default="trial", server_default="trial"
+    )
+    trial_ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    razorpay_subscription_id: Mapped[str | None] = mapped_column(String(100), unique=True)
+    paid_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    billing_grace_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_billing_check_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=now,
+        server_default=text("CURRENT_TIMESTAMP"),
+        index=True,
+    )
+    business_type: Mapped[str | None] = mapped_column(String(40))
+    usage_types: Mapped[list[str]] = mapped_column(JSON, default=list, server_default="[]")
+    country: Mapped[str | None] = mapped_column(String(2))
+    mobile: Mapped[str | None] = mapped_column(String(20))
+    teams_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    teams_email: Mapped[str | None] = mapped_column(String(254))
+    preferred_language: Mapped[str] = mapped_column(String(5), default="en", server_default="en")
+    referral_source: Mapped[str | None] = mapped_column(String(40))
+
+
+class User(Base):
+    __tablename__ = "users"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "email"),
+        UniqueConstraint("email", name="uq_user_email_global"),
+        UniqueConstraint("workspace_id", "id"),
+        ForeignKeyConstraint(
+            ["workspace_id", "parent_user_id"], ["users.workspace_id", "users.id"]
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=identifier)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    email: Mapped[str] = mapped_column(String(254))
+    password_hash: Mapped[str] = mapped_column(String(256))
+    role: Mapped[str] = mapped_column(String(20))
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    email_verified: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    auth_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    parent_user_id: Mapped[str | None] = mapped_column(String(32), index=True)
+    full_name: Mapped[str | None] = mapped_column(String(120))
+    consent_version: Mapped[str | None] = mapped_column(String(40))
+    consent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class Offer(Base):
+    __tablename__ = "offers"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "id"),
+        ForeignKeyConstraint(["workspace_id", "advertiser_id"], ["users.workspace_id", "users.id"]),
+        CheckConstraint("revenue >= 0 AND payout >= 0", name="ck_offer_money"),
+    )
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=identifier)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    name: Mapped[str] = mapped_column(String(200))
+    destination_url: Mapped[str] = mapped_column(String(2048))
+    revenue: Mapped[Decimal] = mapped_column(Numeric(14, 4))
+    payout: Mapped[Decimal] = mapped_column(Numeric(14, 4))
+    currency: Mapped[str] = mapped_column(String(3), default="USD")
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    postback_key_hash: Mapped[str] = mapped_column(String(64))
+    advertiser_id: Mapped[str | None] = mapped_column(String(32))
+    attribution_hours: Mapped[int] = mapped_column(Integer, default=720, server_default="720")
+    tracking_rules: Mapped[dict] = mapped_column(JSON, default=dict, server_default="{}")
+
+
+class TrackingLink(Base):
+    __tablename__ = "tracking_links"
+    __table_args__ = (
+        ForeignKeyConstraint(["workspace_id", "offer_id"], ["offers.workspace_id", "offers.id"]),
+        ForeignKeyConstraint(["workspace_id", "affiliate_id"], ["users.workspace_id", "users.id"]),
+        UniqueConstraint("workspace_id", "id"),
+        UniqueConstraint("workspace_id", "offer_id", "affiliate_id"),
+    )
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=identifier)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    offer_id: Mapped[str] = mapped_column(String(32))
+    affiliate_id: Mapped[str] = mapped_column(String(32))
+
+
+class Click(Base):
+    __tablename__ = "clicks"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["workspace_id", "link_id"], ["tracking_links.workspace_id", "tracking_links.id"]
+        ),
+        UniqueConstraint("workspace_id", "id"),
+        Index("ix_click_workspace_created", "workspace_id", "created_at"),
+    )
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=identifier)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"))
+    link_id: Mapped[str] = mapped_column(String(32), index=True)
+    sub_id: Mapped[str | None] = mapped_column(String(100))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    country: Mapped[str | None] = mapped_column(String(2))
+    device: Mapped[str] = mapped_column(String(20), default="unknown", server_default="unknown")
+    operating_system: Mapped[str] = mapped_column(
+        String(20), default="other", server_default="other"
+    )
+    language: Mapped[str | None] = mapped_column(String(10))
+    ip_hash: Mapped[str | None] = mapped_column(String(64), index=True)
+
+
+class Conversion(Base):
+    __tablename__ = "conversions"
+    __table_args__ = (
+        ForeignKeyConstraint(["workspace_id", "click_id"], ["clicks.workspace_id", "clicks.id"]),
+        ForeignKeyConstraint(["workspace_id", "offer_id"], ["offers.workspace_id", "offers.id"]),
+        UniqueConstraint("workspace_id", "offer_id", "transaction_id"),
+        UniqueConstraint("workspace_id", "click_id"),
+        UniqueConstraint("workspace_id", "id"),
+        Index("ix_conversion_workspace_created", "workspace_id", "created_at"),
+    )
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=identifier)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"))
+    click_id: Mapped[str] = mapped_column(String(32))
+    offer_id: Mapped[str] = mapped_column(String(32))
+    transaction_id: Mapped[str] = mapped_column(String(120))
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    revenue: Mapped[Decimal] = mapped_column(Numeric(14, 4))
+    payout: Mapped[Decimal] = mapped_column(Numeric(14, 4))
+    currency: Mapped[str] = mapped_column(String(3))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+
+
+class AuditEvent(Base):
+    __tablename__ = "audit_events"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=identifier)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    actor_id: Mapped[str] = mapped_column(String(32))
+    action: Mapped[str] = mapped_column(String(80))
+    resource_id: Mapped[str] = mapped_column(String(32))
+    detail: Mapped[str] = mapped_column(String(200))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class AuthSession(Base):
+    __tablename__ = "auth_sessions"
+    __table_args__ = (
+        ForeignKeyConstraint(["workspace_id", "user_id"], ["users.workspace_id", "users.id"]),
+    )
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=identifier)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    user_id: Mapped[str] = mapped_column(String(32), index=True)
+    refresh_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    revoked: Mapped[bool] = mapped_column(Boolean, default=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class ActionToken(Base):
+    __tablename__ = "action_tokens"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=identifier)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    purpose: Mapped[str] = mapped_column(String(20))
+    used: Mapped[bool] = mapped_column(Boolean, default=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class WebhookEndpoint(Base):
+    __tablename__ = "webhook_endpoints"
+    __table_args__ = (
+        ForeignKeyConstraint(["workspace_id", "affiliate_id"], ["users.workspace_id", "users.id"]),
+        UniqueConstraint("workspace_id", "affiliate_id"),
+    )
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=identifier)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    affiliate_id: Mapped[str] = mapped_column(String(32))
+    url: Mapped[str] = mapped_column(String(2048))
+    secret: Mapped[str] = mapped_column(Text)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class OutboxEvent(Base):
+    __tablename__ = "outbox_events"
+    __table_args__ = (Index("ix_outbox_dispatch", "status", "available_at"),)
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=identifier)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    kind: Mapped[str] = mapped_column(String(20))
+    payload: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lease_token: Mapped[str | None] = mapped_column(String(32))
+    last_error: Mapped[str | None] = mapped_column(String(80))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class BillingEvent(Base):
+    __tablename__ = "billing_events"
+    id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class CommissionEntry(Base):
+    __tablename__ = "commission_entries"
+    __table_args__ = (
+        ForeignKeyConstraint(["workspace_id", "affiliate_id"], ["users.workspace_id", "users.id"]),
+        ForeignKeyConstraint(
+            ["workspace_id", "conversion_id"], ["conversions.workspace_id", "conversions.id"]
+        ),
+        UniqueConstraint("workspace_id", "conversion_id", "version"),
+        Index("ix_commission_account", "workspace_id", "affiliate_id", "currency"),
+    )
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=identifier)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"))
+    affiliate_id: Mapped[str] = mapped_column(String(32))
+    conversion_id: Mapped[str] = mapped_column(String(32))
+    version: Mapped[int] = mapped_column(Integer)
+    amount: Mapped[Decimal] = mapped_column(Numeric(14, 4))
+    currency: Mapped[str] = mapped_column(String(3))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class Payout(Base):
+    __tablename__ = "payouts"
+    __table_args__ = (
+        ForeignKeyConstraint(["workspace_id", "affiliate_id"], ["users.workspace_id", "users.id"]),
+        UniqueConstraint("workspace_id", "reference"),
+        Index("ix_payout_account", "workspace_id", "affiliate_id", "currency"),
+        CheckConstraint("amount > 0", name="ck_payout_positive"),
+    )
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=identifier)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"))
+    affiliate_id: Mapped[str] = mapped_column(String(32))
+    amount: Mapped[Decimal] = mapped_column(Numeric(14, 4))
+    currency: Mapped[str] = mapped_column(String(3))
+    reference: Mapped[str] = mapped_column(String(120))
+    recorded_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class OfferCounter(Base):
+    __tablename__ = "offer_counters"
+    __table_args__ = (
+        ForeignKeyConstraint(["workspace_id", "offer_id"], ["offers.workspace_id", "offers.id"]),
+        UniqueConstraint("workspace_id", "offer_id", "period"),
+    )
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=identifier)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"))
+    offer_id: Mapped[str] = mapped_column(String(32))
+    period: Mapped[str] = mapped_column(String(10))
+    clicks: Mapped[int] = mapped_column(Integer, default=0)
+    conversions: Mapped[int] = mapped_column(Integer, default=0)
+    revenue: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=0)
+
+
+class FraudCounter(Base):
+    __tablename__ = "fraud_counters"
+    __table_args__ = (UniqueConstraint("workspace_id", "offer_id", "ip_hash", "minute"),)
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=identifier)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"))
+    offer_id: Mapped[str] = mapped_column(ForeignKey("offers.id"))
+    ip_hash: Mapped[str] = mapped_column(String(64))
+    minute: Mapped[int] = mapped_column(Integer, index=True)
+    count: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class FraudEvent(Base):
+    __tablename__ = "fraud_events"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=identifier)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    offer_id: Mapped[str] = mapped_column(ForeignKey("offers.id"))
+    click_id: Mapped[str | None] = mapped_column(ForeignKey("clicks.id"))
+    ip_hash: Mapped[str | None] = mapped_column(String(64))
+    reason: Mapped[str] = mapped_column(String(80))
+    score: Mapped[int] = mapped_column(Integer)
+    reviewed: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
+
+
+class TrackingDomain(Base):
+    __tablename__ = "tracking_domains"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=identifier)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    hostname: Mapped[str] = mapped_column(String(253), unique=True)
+    verification_hash: Mapped[str] = mapped_column(String(64))
+    active: Mapped[bool] = mapped_column(Boolean, default=False)
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    verification_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class PayoutProvider(Base):
+    __tablename__ = "payout_providers"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=identifier)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), unique=True)
+    credentials: Mapped[str] = mapped_column(Text)
+    automatic: Mapped[bool] = mapped_column(Boolean, default=False)
+    minimum_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=1000)
+    interval_hours: Mapped[int] = mapped_column(Integer, default=168)
+    next_run_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
+    configured_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"))
+    beneficiary_cursor: Mapped[str] = mapped_column(String(32), default="", server_default="")
+
+
+class PayoutRequest(Base):
+    __tablename__ = "payout_requests"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "request_key"),
+        UniqueConstraint("workspace_id", "id"),
+        ForeignKeyConstraint(["workspace_id", "affiliate_id"], ["users.workspace_id", "users.id"]),
+        Index("ix_payout_request_account", "workspace_id", "affiliate_id", "currency", "status"),
+        CheckConstraint("amount > 0", name="ck_payout_request_positive"),
+    )
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=identifier)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"))
+    affiliate_id: Mapped[str] = mapped_column(String(32))
+    amount: Mapped[Decimal] = mapped_column(Numeric(14, 2))
+    currency: Mapped[str] = mapped_column(String(3), default="INR")
+    request_key: Mapped[str] = mapped_column(String(80))
+    fund_account_id: Mapped[str] = mapped_column(String(100))
+    provider_id: Mapped[str | None] = mapped_column(String(100), unique=True)
+    status: Mapped[str] = mapped_column(String(20), default="queued")
+    outbox_id: Mapped[str | None] = mapped_column(ForeignKey("outbox_events.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    requested_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"))
+
+
+class PayoutBeneficiary(Base):
+    __tablename__ = "payout_beneficiaries"
+    __table_args__ = (
+        ForeignKeyConstraint(["workspace_id", "affiliate_id"], ["users.workspace_id", "users.id"]),
+        UniqueConstraint("workspace_id", "affiliate_id"),
+    )
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=identifier)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"))
+    affiliate_id: Mapped[str] = mapped_column(String(32))
+    fund_account_id: Mapped[str] = mapped_column(String(100))
+
+
+class PayoutAdjustment(Base):
+    __tablename__ = "payout_adjustments"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["workspace_id", "affiliate_id"],
+            ["users.workspace_id", "users.id"],
+            name="fk_adjustment_recipient",
+        ),
+        ForeignKeyConstraint(
+            ["workspace_id", "request_id"],
+            ["payout_requests.workspace_id", "payout_requests.id"],
+            name="fk_adjustment_request",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=identifier)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    affiliate_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    request_id: Mapped[str] = mapped_column(ForeignKey("payout_requests.id"), unique=True)
+    amount: Mapped[Decimal] = mapped_column(Numeric(14, 2))
+    currency: Mapped[str] = mapped_column(String(3))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)

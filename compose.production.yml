@@ -1,0 +1,124 @@
+services:
+  gateway:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      PUBLIC_DOMAIN: ${PUBLIC_DOMAIN:?Set PUBLIC_DOMAIN}
+      TLS_EMAIL: ${TLS_EMAIL:?Set TLS_EMAIL}
+      DOMAIN_CERTIFICATE_TOKEN: ${DOMAIN_CERTIFICATE_TOKEN:?Set DOMAIN_CERTIFICATE_TOKEN}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      application:
+        ipv4_address: 172.30.0.2
+    depends_on:
+      api:
+        condition: service_healthy
+    security_opt: [no-new-privileges:true]
+    mem_limit: 256m
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "noeviction", "--requirepass", "${REDIS_PASSWORD:?Set REDIS_PASSWORD}"]
+    volumes:
+      - redis_data:/data
+    networks: [application]
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=$$REDIS_PASSWORD redis-cli ping | grep PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    security_opt: [no-new-privileges:true]
+    mem_limit: 384m
+  migrate:
+    build: .
+    image: relay-platform:${RELEASE_TAG:-local}
+    env_file: .env.production
+    command: ["python", "-m", "alembic", "upgrade", "head"]
+    volumes:
+      - ./deploy/certs:/run/certs:ro
+      - ./deploy/geoip:/run/geoip:ro
+    networks: [application]
+    profiles: [release]
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+  api:
+    build: .
+    image: relay-platform:${RELEASE_TAG:-local}
+    restart: unless-stopped
+    env_file: .env.production
+    volumes:
+      - ./deploy/certs:/run/certs:ro
+      - ./deploy/geoip:/run/geoip:ro
+    networks: [application]
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "scripts/healthcheck.py"]
+      interval: 20s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    mem_limit: 768m
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+  worker:
+    image: relay-platform:${RELEASE_TAG:-local}
+    restart: unless-stopped
+    env_file: .env.production
+    command: ["python", "-m", "app.worker"]
+    volumes:
+      - ./deploy/certs:/run/certs:ro
+      - ./deploy/geoip:/run/geoip:ro
+    networks: [application]
+    depends_on:
+      api:
+        condition: service_healthy
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    mem_limit: 384m
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+  maintenance:
+    image: relay-platform:${RELEASE_TAG:-local}
+    restart: unless-stopped
+    env_file: .env.production
+    command: ["python", "-m", "app.maintenance"]
+    volumes:
+      - ./deploy/certs:/run/certs:ro
+    networks: [application]
+    depends_on:
+      api:
+        condition: service_healthy
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    mem_limit: 384m
+networks:
+  application:
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+volumes:
+  caddy_data:
+  caddy_config:
+  redis_data:

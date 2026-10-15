@@ -1,0 +1,36 @@
+{
+    email {$TLS_EMAIL}
+    on_demand_tls {
+        ask http://api:8000/internal/certificates/allow?token={$DOMAIN_CERTIFICATE_TOKEN}
+    }
+    servers {
+        timeouts {
+            read_body 15s
+            read_header 10s
+            idle 60s
+        }
+    }
+}
+:443 {
+    tls {
+        on_demand
+    }
+    @tracking path /t/*
+    handle @tracking {
+        reverse_proxy api:8000
+    }
+    handle {
+        respond "Not found" 404
+    }
+}
+{$PUBLIC_DOMAIN} {
+    encode zstd gzip
+    request_body {
+        max_size 64KB
+    }
+    reverse_proxy api:8000 {
+        transport http {
+            response_header_timeout 20s
+        }
+    }
+}
