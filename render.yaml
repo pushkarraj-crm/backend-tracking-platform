@@ -7,6 +7,7 @@ services:
     region: singapore
     repo: https://github.com/pushkarraj-crm/backend-tracking-platform
     branch: main
+    autoDeployTrigger: checksPass
     dockerCommand: python scripts/render_start.py
     healthCheckPath: /health/ready
     envVars:
