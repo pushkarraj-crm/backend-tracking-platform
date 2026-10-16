@@ -75,6 +75,11 @@ def subscribe(body: Subscribe, db: DB, user: Actor):
         "customer_notify": 1,
         "notes": {"workspace_id": workspace.id},
     }
+    from .tenancy import company_context
+
+    company = company_context.get()
+    if company:
+        payload["notes"]["company_slug"] = company.slug
     # Signup does not require a card; schedule the first subscription cycle after the free trial.
     if workspace.trial_ends_at and utc(workspace.trial_ends_at) > datetime.now(timezone.utc):
         payload["start_at"] = int(utc(workspace.trial_ends_at).timestamp())
@@ -122,6 +127,18 @@ def ingest_subscription_webhook(raw, headers, db):
     expected = hmac.new(settings.razorpay_webhook_secret.encode(), raw, hashlib.sha256).hexdigest()
     if not hmac.compare_digest(signature, expected):
         raise HTTPException(401, "Invalid webhook signature")
+    from .tenancy import company_context, find_company, using_company, company_sessions
+
+    if settings.company_databases and company_context.get() is None:
+        try:
+            slug = json.loads(raw)["payload"]["subscription"]["entity"]["notes"]["company_slug"]
+        except (ValueError, KeyError, TypeError):
+            raise HTTPException(422, "Company subscription notes required") from None
+        company = find_company(slug)
+        if not company:
+            raise HTTPException(404, "Unknown company subscription")
+        with using_company(company), company_sessions(company)() as tenant_db:
+            return ingest_subscription_webhook(raw, headers, tenant_db)
     event_id = headers.get("x-razorpay-event-id", "")
     if not event_id or len(event_id) > 100:
         raise HTTPException(422, "Webhook event ID required")

@@ -32,6 +32,9 @@ def output_user(user):
 
 
 def output_offer(offer):
+    from .tenancy import company_context
+
+    company = company_context.get()
     result = {
         key: getattr(offer, key)
         for key in (
@@ -48,6 +51,10 @@ def output_offer(offer):
     }
     result["revenue"] = str(offer.revenue)
     result["payout"] = str(offer.payout)
+    prefix = "/c/" + company.slug if company else ""
+    result["postback_url"] = (
+        settings.public_base_url.rstrip("/") + prefix + "/postbacks/" + offer.id
+    )
     return result
 
 

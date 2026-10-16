@@ -9,6 +9,10 @@ from cryptography.fernet import Fernet
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", hide_input_in_errors=True)
     database_url: str
+    company_databases: bool = False
+    company_base_domain: str = "localhost"
+    company_frontend_port: int = Field(default=3000, ge=1, le=65535)
+    company_database_admin_url: str = ""
     jwt_secret: str = Field(min_length=32)
     token_minutes: int = Field(default=30, ge=1, le=120)
     public_base_url: str = "http://localhost:8000"
@@ -62,6 +66,18 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def production_config(self):
+        import re
+
+        if not re.fullmatch(r"[a-z0-9]+(?:[.-][a-z0-9]+)*", self.company_base_domain):
+            raise ValueError("COMPANY_BASE_DOMAIN must be a hostname without scheme or port")
+        if self.company_databases:
+            if not self.encryption_key or not self.database_url.startswith("postgresql+psycopg://"):
+                raise ValueError("Company databases require PostgreSQL and ENCRYPTION_KEY")
+            if (
+                self.environment in {"staging", "production"}
+                and self.company_base_domain == "localhost"
+            ):
+                raise ValueError("Configure COMPANY_BASE_DOMAIN before enabling company databases")
         if self.encryption_key:
             try:
                 Fernet(self.encryption_key.encode())

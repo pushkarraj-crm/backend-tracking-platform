@@ -99,6 +99,9 @@ def verify_domain(domain_id: str, db: DB, user: Actor):
     domain = owned(db, TrackingDomain, domain_id, user)
     if not verify_dns(domain):
         raise HTTPException(422, "DNS ownership TXT and routing CNAME could not be verified")
+    from .tenancy import reserve_hostname
+
+    reserve_hostname(domain.hostname)
     domain.active = True
     domain.verified_at = datetime.now(timezone.utc)
     domain.verification_expires_at = domain.verified_at + timedelta(days=7)
@@ -183,6 +186,11 @@ class DomainHostMiddleware:
             hostname = None
         if hostname in get_settings().allowed_hosts:
             return await self.app(scope, receive, send)
+        from .tenancy import company_context, dashboard_url
+
+        company = company_context.get()
+        if company and hostname == urlsplit(dashboard_url(company.slug)).hostname:
+            return await self.app(scope, receive, send)
         if (
             scope["path"] == "/internal/certificates/allow"
             and (scope.get("client") or ("", 0))[0] == get_settings().trusted_gateway_ip
@@ -224,8 +232,12 @@ def revalidate_domains():
 
 
 def link_base(db, user, domain_id):
+    from .tenancy import company_context
+
+    company = company_context.get()
+    suffix = "/c/" + company.slug if company else ""
     if not domain_id:
-        return get_settings().public_base_url.rstrip("/")
+        return get_settings().public_base_url.rstrip("/") + suffix
     record = db.scalar(
         select(TrackingDomain).where(
             TrackingDomain.id == domain_id, TrackingDomain.workspace_id == user.workspace_id
@@ -233,4 +245,4 @@ def link_base(db, user, domain_id):
     )
     if not enabled(record):
         raise HTTPException(404, "Verified tracking domain not found")
-    return "https://" + record.hostname
+    return "https://" + record.hostname + suffix

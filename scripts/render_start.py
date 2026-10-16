@@ -34,6 +34,10 @@ def main():
     prepare_environment(os.environ)
     # The managed database is fresh for this preview. Existing data is preserved.
     subprocess.run([sys.executable, "-m", "alembic", "upgrade", "head"], check=True)
+    subprocess.run(
+        [sys.executable, "-c", "from app.tenancy import migrate_companies; migrate_companies()"],
+        check=True,
+    )
     port = str(int(os.environ.get("PORT", "10000")))
     commands = [
         [

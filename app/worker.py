@@ -135,7 +135,9 @@ def main():
     signal.signal(signal.SIGINT, stop)
     while not stopping:
         try:
-            if not run_once():
+            from .tenancy import for_each_company
+
+            if not for_each_company(run_once):
                 time.sleep(settings.worker_poll_seconds)
         except Exception as error:
             logger.error("worker iteration failed: %s", type(error).__name__)

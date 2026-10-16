@@ -78,7 +78,9 @@ def main():
     signal.signal(signal.SIGINT, stop)
     while not stopping:
         try:
-            run_once()
+            from .tenancy import for_each_company
+
+            for_each_company(run_once)
         except Exception as error:
             logger.error("maintenance failed: %s", type(error).__name__)
         for _ in range(60):

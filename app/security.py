@@ -47,12 +47,16 @@ def key_hash(value: str):
 
 
 def token_for(user: User, session_id: str):
+    from .tenancy import company_context
+
+    company = company_context.get()
     settings = get_settings()
     now = datetime.now(timezone.utc)
     return jwt.encode(
         {
             "sub": user.id,
             "tenant": user.workspace_id,
+            "company": company.slug if company else None,
             "sid": session_id,
             "ver": user.auth_version,
             "iat": now,
@@ -88,6 +92,11 @@ def current_user(
         except jwt.InvalidTokenError:
             continue
     if claims is None:
+        raise error
+    from .tenancy import company_context
+
+    company = company_context.get()
+    if claims.get("company") != (company.slug if company else None):
         raise error
     user = db.get(User, claims["sub"])
     session = db.get(AuthSession, claims["sid"])

@@ -29,6 +29,9 @@ class EmailAction(StrictModel):
 
 
 def issue_action(db, user, purpose):
+    from .tenancy import company_context, dashboard_url
+
+    company = company_context.get()
     raw = secrets.token_urlsafe(48)
     db.add(
         ActionToken(
@@ -45,7 +48,9 @@ def issue_action(db, user, purpose):
         {
             "to": user.email,
             "purpose": purpose,
-            "url": settings.frontend_base_url.rstrip("/")
+            "url": (
+                dashboard_url(company.slug) if company else settings.frontend_base_url.rstrip("/")
+            )
             + "/account?action="
             + purpose
             + "#token="
@@ -111,6 +116,11 @@ def validate_origin(request):
         f"{frontend.scheme}://{frontend.netloc}",
         *settings.cors_origins,
     ]
+    from .tenancy import company_context, dashboard_url
+
+    company = company_context.get()
+    if company:
+        allowed.append(dashboard_url(company.slug))
     if origin and origin not in allowed:
         raise HTTPException(403, "Origin not allowed")
 
@@ -140,6 +150,14 @@ def register(body: Register, db: DB, response: Response):
         raise HTTPException(
             422, "Policy version changed; reload the signup options and review the policies"
         )
+    if settings.company_databases:
+        from .tenancy import provision
+
+        return provision(body, create_registered_account)
+    return create_registered_account(body, db, response)
+
+
+def create_registered_account(body, db, response=None):
     workspace = Workspace(
         name=body.company,
         trial_ends_at=datetime.now(timezone.utc) + timedelta(days=15),
@@ -174,8 +192,10 @@ def register(body: Register, db: DB, response: Response):
     if settings.require_email_verification:
         issue_action(db, user, "verify")
         result = {"verification_required": True, "email": user.email, "trial_days": 15}
-    else:
+    elif response is not None:
         result = mint(db, user, response)
+    else:
+        result = {"login_required": True}
     db.commit()
     return result
 
@@ -224,6 +244,8 @@ def registration_options():
         ]
     return {
         **result,
+        "company_databases": settings.company_databases,
+        "company_base_domain": settings.company_base_domain if settings.company_databases else None,
         "countries": country_options(),
         "registration_enabled": settings.allow_registration,
         "trial_days": 15,

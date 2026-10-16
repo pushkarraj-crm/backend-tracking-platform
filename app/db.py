@@ -36,7 +36,24 @@ if settings.database_url.startswith("sqlite"):
         connection.execute("PRAGMA journal_mode=WAL")
 
 
-SessionLocal = sessionmaker(engine, expire_on_commit=False)
+ControlSession = sessionmaker(engine, expire_on_commit=False)
+
+
+class RoutedSessions:
+    def factory(self):
+        from .tenancy import company_context, company_sessions
+
+        company = company_context.get()
+        return company_sessions(company) if company else ControlSession
+
+    def __call__(self, **kwargs):
+        return self.factory()(**kwargs)
+
+    def begin(self):
+        return self.factory().begin()
+
+
+SessionLocal = RoutedSessions()
 
 
 def get_db():

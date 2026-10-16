@@ -21,6 +21,7 @@ from .tracking import router as tracking_router
 from .domains import router as domains_router, DomainHostMiddleware
 from .reporting import router as reporting_router
 from .automated_payouts import router as automated_payouts_router
+from .tenancy import CompanyMiddleware
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 
@@ -58,6 +59,7 @@ app.add_middleware(
     allow_credentials=True,
 )
 app.add_middleware(DomainHostMiddleware)
+app.add_middleware(CompanyMiddleware)
 app.add_middleware(SecurityMiddleware)
 app.include_router(auth_router)
 app.include_router(core_router)
@@ -106,7 +108,11 @@ async def ready():
     try:
 
         def database_probe():
-            with engine.connect() as connection:
+            from .tenancy import company_context, company_sessions
+
+            company = company_context.get()
+            target = company_sessions(company).kw["bind"] if company else engine
+            with target.connect() as connection:
                 connection.execute(text("SELECT 1"))
                 revision = connection.execute(
                     text("SELECT version_num FROM alembic_version")

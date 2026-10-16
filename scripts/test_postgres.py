@@ -17,6 +17,13 @@ def main():
     environment["TEST_DATABASE_URL"] = url.set(database="affiliate_test").render_as_string(
         hide_password=False
     )
+    password_file = root / ".postgres-admin-password"
+    if url.host == "127.0.0.1" and url.port == 5433 and password_file.is_file():
+        environment["COMPANY_DATABASE_ADMIN_URL"] = url.set(
+            username="postgres",
+            database="postgres",
+            password=password_file.read_text(encoding="ascii"),
+        ).render_as_string(hide_password=False)
     result = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", *sys.argv[1:]], cwd=root, env=environment
     )

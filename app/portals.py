@@ -8,6 +8,7 @@ from .models import Workspace, User, WebhookEndpoint, OutboxEvent
 from .services import audit, encrypt, entitlement
 from .routes import owned
 from .delivery import validate_destination
+from .config import get_settings
 
 router = APIRouter(tags=["Portals"])
 
@@ -66,6 +67,25 @@ def workspace_info(db: DB, user: Actor):
 @router.get("/platform/summary")
 def platform_summary(db: DB, user: Actor):
     platform_only(user)
+    if get_settings().company_databases:
+        from .tenancy import active_companies, company_sessions
+
+        total = {"workspaces": 0, "users": 0, "active_subscriptions": 0, "pending_deliveries": 0}
+        for company in active_companies():
+            with company_sessions(company)() as tenant_db:
+                total["workspaces"] += tenant_db.scalar(select(func.count()).select_from(Workspace))
+                total["users"] += tenant_db.scalar(select(func.count()).select_from(User))
+                total["active_subscriptions"] += tenant_db.scalar(
+                    select(func.count())
+                    .select_from(Workspace)
+                    .where(Workspace.subscription_status == "active")
+                )
+                total["pending_deliveries"] += tenant_db.scalar(
+                    select(func.count())
+                    .select_from(OutboxEvent)
+                    .where(OutboxEvent.status.in_(["pending", "processing"]))
+                )
+        return total
     return {
         "workspaces": db.scalar(select(func.count()).select_from(Workspace)),
         "users": db.scalar(select(func.count()).select_from(User)),
@@ -87,6 +107,23 @@ def platform_workspaces(
     db: DB, user: Actor, offset: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=100)
 ):
     platform_only(user)
+    from .config import get_settings
+    from .tenancy import active_companies, company_sessions, dashboard_url
+
+    if get_settings().company_databases:
+        result = []
+        for company in active_companies()[offset : offset + limit]:
+            with company_sessions(company)() as tenant_db:
+                workspace = tenant_db.get(Workspace, company.workspace_id)
+                if workspace:
+                    result.append(
+                        {
+                            **workspace_output(workspace),
+                            "company_slug": company.slug,
+                            "dashboard_url": dashboard_url(company.slug),
+                        }
+                    )
+        return result
     return [
         workspace_output(w)
         for w in db.scalars(
@@ -103,6 +140,24 @@ def platform_workspace_update(workspace_id: str, body: WorkspaceUpdate, db: DB, 
     platform_only(user)
     if workspace_id == user.workspace_id:
         raise HTTPException(400, "Cannot suspend platform owner workspace")
+    from .config import get_settings
+    from .tenancy import Company, company_sessions
+
+    if get_settings().company_databases:
+        company = db.scalar(
+            select(Company).where(Company.workspace_id == workspace_id, Company.status == "active")
+        )
+        if not company:
+            raise HTTPException(404, "Company not found")
+        with company_sessions(company).begin() as tenant_db:
+            workspace = tenant_db.get(Workspace, workspace_id)
+            if not workspace:
+                raise HTTPException(404, "Workspace not found")
+            workspace.active = body.active
+            result = workspace_output(workspace)
+        audit(db, user, "platform.workspace_active", workspace_id, str(body.active))
+        db.commit()
+        return result
     workspace = db.get(Workspace, workspace_id)
     if not workspace:
         raise HTTPException(404, "Workspace not found")
