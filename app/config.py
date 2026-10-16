@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     privacy_url: str = ""
     legal_version: str = "1"
     cors_origins: list[str] = []
-    environment: Literal["development", "test", "production"] = "development"
+    environment: Literal["development", "test", "staging", "production"] = "development"
     auto_create_tables: bool = False
     rate_limit_per_minute: int = Field(default=120, ge=1)
     auth_rate_per_minute: int = Field(default=10, ge=1, le=100)
@@ -67,7 +67,7 @@ class Settings(BaseSettings):
                 Fernet(self.encryption_key.encode())
             except (ValueError, TypeError):
                 raise ValueError("ENCRYPTION_KEY must be a valid Fernet key")
-        if self.cookie_samesite == "none" and self.environment != "production":
+        if self.cookie_samesite == "none" and self.environment not in {"staging", "production"}:
             raise ValueError("Cross-site cookies require production HTTPS")
         if self.db_schema and self.environment != "test":
             raise ValueError("Isolated schema overrides are for test mode only")
@@ -76,14 +76,18 @@ class Settings(BaseSettings):
                 raise ValueError("DATABASE_URL must use postgresql+psycopg://")
         if self.environment != "test" and self.auto_create_tables:
             raise ValueError("Use Alembic migrations instead of AUTO_CREATE_TABLES")
-        if self.environment == "production":
+        if self.environment in {"staging", "production"}:
             if not self.public_base_url.startswith("https://"):
                 raise ValueError("Production public_base_url requires HTTPS")
             if not self.frontend_base_url.startswith("https://"):
                 raise ValueError("Production frontend_base_url requires HTTPS")
-            if self.allow_registration and (
-                not self.terms_url.startswith("https://")
-                or not self.privacy_url.startswith("https://")
+            if (
+                self.environment == "production"
+                and self.allow_registration
+                and (
+                    not self.terms_url.startswith("https://")
+                    or not self.privacy_url.startswith("https://")
+                )
             ):
                 raise ValueError("Public signup requires HTTPS terms and privacy URLs")
             if self.database_url.startswith("sqlite") or self.auto_create_tables:
@@ -94,15 +98,25 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "Production requires Redis, encryption key and a strong metrics token"
                 )
-            if not self.require_email_verification or not self.smtp_host or not self.smtp_from:
+            if self.environment == "production" and (
+                not self.require_email_verification or not self.smtp_host or not self.smtp_from
+            ):
                 raise ValueError("Production requires verified email and SMTP")
             if "*" in self.allowed_hosts or not self.allowed_hosts:
                 raise ValueError("Production requires explicit allowed hosts")
-            if "replace-" in self.jwt_secret or len(self.jwt_secret) < 48:
+            if "replace-" in self.jwt_secret or len(self.jwt_secret) < (
+                48 if self.environment == "production" else 32
+            ):
                 raise ValueError("Production JWT secret must be random and at least 48 characters")
             if urlsplit(self.public_base_url).hostname not in self.allowed_hosts:
                 raise ValueError("Public URL host must be allowed")
             if (
+                self.environment == "staging"
+                and self.razorpay_key_id
+                and not self.razorpay_key_id.startswith("rzp_test_")
+            ):
+                raise ValueError("Staging accepts Razorpay test-mode credentials only")
+            if self.environment == "production" and (
                 not self.razorpay_key_id.startswith("rzp_")
                 or not self.razorpay_key_secret
                 or not self.razorpay_webhook_secret

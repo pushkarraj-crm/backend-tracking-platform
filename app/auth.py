@@ -67,7 +67,7 @@ def mint(db, user, response, session=None):
         db.add(session)
     raw = session.id + "." + secrets.token_urlsafe(48)
     session.refresh_hash = key_hash(raw)
-    secure = settings.environment == "production"
+    secure = settings.environment in {"staging", "production"}
     response.set_cookie(
         "refresh_token",
         raw,
@@ -331,6 +331,10 @@ def forgot_password(body: EmailAction, db: DB):
 
 
 def request_action(body, db, purpose):
+    if settings.environment == "staging" and not settings.smtp_host:
+        raise HTTPException(
+            503, "Email delivery is not configured for this personal test deployment"
+        )
     user = db.scalar(select(User).where(User.email == str(body.email).lower()))
     if user and user.active and (purpose != "verify" or not user.email_verified):
         issue_action(db, user, purpose)

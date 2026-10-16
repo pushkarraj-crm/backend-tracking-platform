@@ -1,0 +1,54 @@
+# Personal testing only. Every resource is explicitly Free; no paid workers/disks.
+services:
+  - type: web
+    name: backend-tracking-platform
+    runtime: docker
+    plan: free
+    region: singapore
+    repo: https://github.com/pushkarraj-crm/backend-tracking-platform
+    branch: main
+    dockerCommand: python scripts/render_start.py
+    healthCheckPath: /health/ready
+    envVars:
+      - key: ENVIRONMENT
+        value: staging
+      - key: DATABASE_URL
+        fromDatabase:
+          name: tracking-platform-preview-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          name: tracking-platform-preview-kv
+          type: keyvalue
+          property: connectionString
+      - key: JWT_SECRET
+        generateValue: true
+      - key: ENCRYPTION_KEY
+        generateValue: true
+      - key: METRICS_TOKEN
+        generateValue: true
+      - key: FRONTEND_BASE_URL
+        sync: false
+      - key: REQUIRE_EMAIL_VERIFICATION
+        value: "false"
+      - key: ALLOW_REGISTRATION
+        value: "true"
+      - key: COOKIE_SAMESITE
+        value: strict
+      - key: DB_POOL_SIZE
+        value: "3"
+      - key: DB_MAX_OVERFLOW
+        value: "2"
+  - type: keyvalue
+    name: tracking-platform-preview-kv
+    plan: free
+    region: singapore
+    ipAllowList: []
+    maxmemoryPolicy: noeviction
+databases:
+  - name: tracking-platform-preview-db
+    plan: free
+    region: singapore
+    databaseName: tracking_preview
+    user: tracking_preview
+    ipAllowList: []

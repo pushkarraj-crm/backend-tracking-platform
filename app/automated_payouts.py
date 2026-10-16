@@ -75,6 +75,8 @@ def provider_call(credentials, method, path, body=None, idempotency=None):
 
 @router.put("/provider")
 def configure(body: ProviderBody, db: DB, user: Actor):
+    if get_settings().environment == "staging" and not body.key_id.startswith("rzp_test_"):
+        raise HTTPException(422, "Personal test deployments accept RazorpayX test credentials only")
     admin(user)
     entitlement(db.get(Workspace, user.workspace_id))
     # Serialize against payout creation and block credential changes while money is reserved.

@@ -80,7 +80,7 @@ class SecurityMiddleware:
                         (b"permissions-policy", b"camera=(), microphone=(), geolocation=()"),
                     ]
                 )
-                if self.settings.environment == "production":
+                if self.settings.environment in {"staging", "production"}:
                     headers.append(
                         (b"strict-transport-security", b"max-age=31536000; includeSubDomains")
                     )
