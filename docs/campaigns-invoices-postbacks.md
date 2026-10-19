@@ -110,7 +110,7 @@ cannot impersonate either payment party. Repeated invalid transitions return 409
 The platform never transfers publisher funds. Old `/automated-payouts/*` routes
 and manual `POST /payouts` return 410. Old queued payout jobs fail without contacting
 a provider, and maintenance no longer schedules transfers. Legacy financial tables
-and read-only payout/balance APIs remain for reconciliation. Existing pending
+and read-only payout/balance APIs remain for legacy reconciliation. New campaign earnings are excluded from those legacy balances; use invoice summaries for current payable amounts. Existing pending
 provider transfers, if any, require external reconciliation; no success is invented
 and no historic reservations are silently released. Razorpay **SaaS subscription**
 billing, its 15-day trial and lifecycle maintenance remain separate.

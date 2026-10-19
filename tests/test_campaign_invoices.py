@@ -169,6 +169,7 @@ def test_s2s_campaign_to_publisher_confirmed_invoice(client, model, amount):
     )
     detail = client.get("/publisher-invoices/" + invoice["id"], headers=pub).json()
     assert len(detail["events"]) == 6 and detail["confirmed_at"]
+    assert client.get("/payouts/balances", headers=admin).json() == []
     reports = [e for e in detail["events"] if e["action"] == "report_payment"]
     assert [e["evidence"]["payment_reference"] for e in reports] == ["BANK-001", "BANK-002"]
     other, other_adv = partner(client, admin, "advertiser", "other-advertiser")
@@ -332,6 +333,7 @@ def test_signed_publisher_s2s_event_contains_commission_and_is_durable(client, m
     import hmac
     import json
     from app import delivery, worker
+    from types import SimpleNamespace
     from app.config import get_settings
     from app.db import SessionLocal
     from app.models import OutboxEvent
@@ -340,9 +342,12 @@ def test_signed_publisher_s2s_event_contains_commission_and_is_durable(client, m
     admin, adv, pub, advertiser, publisher, campaign, link, click_id = campaign_flow(client)
     monkeypatch.setattr(get_settings(), "outbound_allowed_hosts", ["publisher.example"])
     monkeypatch.setattr(
-        delivery.socket,
-        "getaddrinfo",
-        lambda *args, **kwargs: [(None, None, None, None, ("93.184.216.34", 443))],
+        delivery,
+        "socket",
+        SimpleNamespace(
+            SOCK_STREAM=delivery.socket.SOCK_STREAM,
+            getaddrinfo=lambda *args, **kwargs: [(None, None, None, None, ("93.184.216.34", 443))],
+        ),
     )
     configured = client.put(
         "/publisher-postback", headers=pub, json={"url": "https://publisher.example/events"}
@@ -381,9 +386,13 @@ def test_signed_publisher_s2s_event_contains_commission_and_is_durable(client, m
         def wrap_socket(self, *args, **kwargs):
             return object()
 
-    monkeypatch.setattr(delivery.http.client, "HTTPSConnection", Connection)
-    monkeypatch.setattr(delivery.socket, "create_connection", lambda *a, **k: object())
-    monkeypatch.setattr(delivery.ssl, "create_default_context", lambda: Context())
+    monkeypatch.setattr(
+        delivery, "http", SimpleNamespace(client=SimpleNamespace(HTTPSConnection=Connection))
+    )
+    monkeypatch.setattr(
+        delivery.socket, "create_connection", lambda *a, **k: object(), raising=False
+    )
+    monkeypatch.setattr(delivery, "ssl", SimpleNamespace(create_default_context=lambda: Context()))
     with SessionLocal() as db:
         event = db.scalar(select(OutboxEvent).where(OutboxEvent.kind == "webhook"))
         assert event and event.status == "pending"

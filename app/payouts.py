@@ -2,7 +2,7 @@ from decimal import Decimal
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import Field
 from sqlalchemy import select, func, union_all
-from .models import CommissionEntry, Payout, PayoutRequest, PayoutAdjustment
+from .models import CommissionEntry, Payout, PayoutRequest, PayoutAdjustment, Conversion, Offer
 from .security import DB, Actor, staff_only
 from .schemas import StrictModel
 from .routes import visible_users
@@ -18,9 +18,12 @@ class PayoutBody(StrictModel):
 
 
 def entries(user):
-    credits = select(
-        CommissionEntry.affiliate_id, CommissionEntry.currency, CommissionEntry.amount
-    ).where(CommissionEntry.workspace_id == user.workspace_id)
+    credits = (
+        select(CommissionEntry.affiliate_id, CommissionEntry.currency, CommissionEntry.amount)
+        .join(Conversion, Conversion.id == CommissionEntry.conversion_id)
+        .join(Offer, Offer.id == Conversion.offer_id)
+        .where(CommissionEntry.workspace_id == user.workspace_id, Offer.campaign_model == "legacy")
+    )
     debits = select(Payout.affiliate_id, Payout.currency, (-Payout.amount).label("amount")).where(
         Payout.workspace_id == user.workspace_id
     )
