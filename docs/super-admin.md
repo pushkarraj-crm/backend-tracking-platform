@@ -11,7 +11,7 @@ registration request or API key can grant it.
 An authorized operator runs this command against the intended backend database:
 
 ```
-python scripts/grant_owner.py --email pushkar@vedhaka.com
+python scripts/grant_owner.py --email owner@example.com
 ```
 
 The account must already exist, be active and have verified email. Its password
