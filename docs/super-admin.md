@@ -16,7 +16,11 @@ python scripts/grant_owner.py --email pushkar@vedhaka.com
 
 The account must already exist, be active and have verified email. Its password
 is retained, sessions/API keys are revoked, and an audit entry is recorded. No
-default password, startup auto-promotion or public bootstrap endpoint exists.
+default password or public bootstrap endpoint exists. Startup grants nothing by default.
+On a free host without shell access, an authorized operator can explicitly set
+`INITIAL_PLATFORM_OWNER_EMAIL` to the existing verified account email. The startup
+helper performs initial setup only; an existing owner is never re-promoted or
+logged out on restarts. Remove the variable after verifying access.
 With company databases, the operator can specify `--company slug` to select an
 existing verified identity for control-plane access. Sign in on the super admin
 app's control origin, not an individual network subdomain.

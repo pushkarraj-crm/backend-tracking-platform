@@ -38,6 +38,13 @@ def main():
         [sys.executable, "-c", "from app.tenancy import migrate_companies; migrate_companies()"],
         check=True,
     )
+    # Operator-only opt-in for free hosts without an interactive shell. No default owner.
+    owner_email = os.environ.get("INITIAL_PLATFORM_OWNER_EMAIL")
+    if owner_email:
+        subprocess.run(
+            [sys.executable, "scripts/grant_owner.py", "--email", owner_email, "--initial-only"],
+            check=True,
+        )
     port = str(int(os.environ.get("PORT", "10000")))
     commands = [
         [

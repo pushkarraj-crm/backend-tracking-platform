@@ -86,3 +86,16 @@ def test_operator_bootstrap_uses_existing_verified_account_and_revokes_sessions(
     assert client.get("/platform/summary", headers=fresh).status_code == 200
     with pytest.raises(ValueError):
         grant_owner("not-registered@example.com")
+
+
+def test_initial_owner_setup_does_not_revoke_owner_on_restart(client):
+    from scripts.grant_owner import grant_owner
+
+    admin, account = register(client, "Initial owner network")
+    member, old = partner(client, admin, "advertiser", "initial-owner")
+    grant_owner(member["email"], initial_only=True)
+    fresh = sign_in(client, None, member["email"])
+    grant_owner(member["email"], initial_only=True)
+    assert client.get("/platform/summary", headers=fresh).status_code == 200
+    with pytest.raises(ValueError):
+        grant_owner("another@example.com", initial_only=True)

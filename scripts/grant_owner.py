@@ -14,9 +14,19 @@ from app.network_models import PartnerApiKey  # noqa: E402
 from app.config import get_settings  # noqa: E402
 
 
-def grant_owner(email, company_slug=None):
+def grant_owner(email, company_slug=None, initial_only=False):
     email = str(TypeAdapter(EmailStr).validate_python(email)).lower()
     with ControlSession.begin() as db:
+        if initial_only:
+            existing = db.scalar(
+                select(User).where(User.role == "platform_admin").with_for_update()
+            )
+            if existing:
+                if existing.email != email or not existing.active:
+                    raise ValueError(
+                        "A different or disabled owner already exists; use the manual operator procedure"
+                    )
+                return existing.id
         account = db.scalar(select(User).where(User.email == email).with_for_update())
         if not account and get_settings().company_databases:
             from app.tenancy import active_companies, company_sessions
@@ -91,9 +101,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--email", required=True)
     parser.add_argument("--company", help="Required if the email belongs to multiple companies")
+    parser.add_argument(
+        "--initial-only",
+        action="store_true",
+        help="Initialize once; never revoke an existing owner's sessions on restart",
+    )
     args = parser.parse_args()
     try:
-        grant_owner(args.email, args.company)
+        grant_owner(args.email, args.company, args.initial_only)
     except ValueError as error:
         raise SystemExit(str(error)) from None
     print(
