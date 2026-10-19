@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select, func, case
 from .db import SessionLocal
 from .models import Click, TrackingLink, Offer, Conversion
+from .network_models import Impression
 from .security import DB, Actor
 from .routes import visible_users, entitled
 
@@ -22,6 +23,20 @@ class Filters(BaseModel):
     country: str | None = Field(default=None, pattern=r"^[A-Z]{2}$")
     sub_id: str | None = Field(default=None, max_length=100)
     status: Literal["pending", "approved", "rejected"] | None = None
+    event_key: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_]{0,63}$")
+    source: str | None = Field(default=None, max_length=256)
+    aff_click_id: str | None = Field(default=None, max_length=256)
+    sub_aff_id: str | None = Field(default=None, max_length=256)
+    aff_sub1: str | None = Field(default=None, max_length=256)
+    aff_sub2: str | None = Field(default=None, max_length=256)
+    aff_sub3: str | None = Field(default=None, max_length=256)
+    aff_sub4: str | None = Field(default=None, max_length=256)
+    aff_sub5: str | None = Field(default=None, max_length=256)
+    aff_sub6: str | None = Field(default=None, max_length=256)
+    aff_sub7: str | None = Field(default=None, max_length=256)
+    aff_sub8: str | None = Field(default=None, max_length=256)
+    aff_sub9: str | None = Field(default=None, max_length=256)
+    aff_sub10: str | None = Field(default=None, max_length=256)
 
 
 FilterDep = Annotated[Filters, Depends()]
@@ -35,8 +50,8 @@ def window(filters):
     return start, end
 
 
-def scope(query, user, filters):
-    query = query.where(Click.workspace_id == user.workspace_id)
+def scope(query, user, filters, traffic=Click):
+    query = query.where(traffic.workspace_id == user.workspace_id)
     if user.role in {"affiliate", "publisher"}:
         query = query.where(TrackingLink.affiliate_id.in_(visible_users(user)))
     elif user.role == "advertiser":
@@ -48,14 +63,47 @@ def scope(query, user, filters):
     if filters.affiliate_id:
         query = query.where(TrackingLink.affiliate_id == filters.affiliate_id)
     if filters.country:
-        query = query.where(Click.country == filters.country)
+        query = query.where(traffic.country == filters.country)
     if filters.sub_id:
-        query = query.where(Click.sub_id == filters.sub_id)
+        query = query.where(traffic.sub_id == filters.sub_id)
+    for key in ["source", "aff_click_id", "sub_aff_id", *[f"aff_sub{i}" for i in range(1, 11)]]:
+        if getattr(filters, key) is not None:
+            query = query.where(traffic.attributes[key].as_string() == getattr(filters, key))
+    if filters.event_key or filters.status:
+        if traffic is Impression:
+            raise HTTPException(
+                422, "Event/status filters apply to clicks and conversions, not impressions"
+            )
+        event_query = select(Conversion.id).where(Conversion.click_id == Click.id)
+        if filters.event_key:
+            event_query = event_query.where(Conversion.event_key == filters.event_key)
+        if filters.status:
+            event_query = event_query.where(Conversion.status == filters.status)
+        query = query.where(event_query.correlate(Click).exists())
     return query
 
 
 def detail_query(dataset, user, filters):
     start, end = window(filters)
+    if dataset == "impressions":
+        query = (
+            select(
+                Impression.id,
+                TrackingLink.offer_id,
+                TrackingLink.affiliate_id,
+                Impression.sub_id,
+                Impression.country,
+                Impression.device,
+                Impression.operating_system,
+                Impression.attributes,
+                Impression.created_at,
+            )
+            .join(TrackingLink, TrackingLink.id == Impression.link_id)
+            .join(Offer, Offer.id == TrackingLink.offer_id)
+            .where(Impression.created_at >= start, Impression.created_at < end)
+            .order_by(Impression.created_at, Impression.id)
+        )
+        return scope(query, user, filters, Impression)
     if dataset == "clicks":
         query = (
             select(
@@ -68,6 +116,7 @@ def detail_query(dataset, user, filters):
                 Click.operating_system,
                 Click.language,
                 Click.created_at,
+                Click.attributes,
             )
             .join(TrackingLink, Click.link_id == TrackingLink.id)
             .join(Offer, TrackingLink.offer_id == Offer.id)
@@ -82,6 +131,9 @@ def detail_query(dataset, user, filters):
             Conversion.offer_id,
             TrackingLink.affiliate_id,
             Conversion.transaction_id,
+            Conversion.event_key,
+            Conversion.event_type,
+            Conversion.sale_amount,
             Conversion.status,
             Conversion.currency,
             Conversion.created_at,
@@ -101,6 +153,8 @@ def detail_query(dataset, user, filters):
         )
         if filters.status:
             query = query.where(Conversion.status == filters.status)
+        if filters.event_key:
+            query = query.where(Conversion.event_key == filters.event_key)
     return scope(query, user, filters)
 
 
@@ -144,13 +198,39 @@ def conversions(
     ]
 
 
+@router.get("/impressions")
+def impressions(
+    db: DB,
+    user: Actor,
+    filters: FilterDep,
+    offset: int = Query(0, ge=0, le=10000),
+    limit: int = Query(50, ge=1, le=100),
+):
+    entitled(db, user)
+    return [
+        serialize(row)
+        for row in db.execute(
+            detail_query("impressions", user, filters).offset(offset).limit(limit)
+        ).mappings()
+    ]
+
+
 @router.get("/grouped")
 def grouped(
     db: DB,
     user: Actor,
     filters: FilterDep,
     group_by: Literal[
-        "offer", "affiliate", "sub_id", "country", "device", "operating_system", "day", "hour"
+        "offer",
+        "affiliate",
+        "sub_id",
+        "country",
+        "device",
+        "operating_system",
+        "day",
+        "hour",
+        "event",
+        "source",
     ] = "offer",
     limit: int = Query(100, ge=1, le=1000),
 ):
@@ -163,6 +243,8 @@ def grouped(
         "country": Click.country,
         "device": Click.device,
         "operating_system": Click.operating_system,
+        "event": Conversion.event_key,
+        "source": Click.attributes["source"].as_string(),
     }
     if group_by in {"day", "hour"}:
         dimension = (
@@ -178,9 +260,12 @@ def grouped(
     columns = [
         dimension.label("group"),
         Offer.currency,
-        func.count(Click.id).label("clicks"),
+        func.count(func.distinct(Click.id)).label("clicks"),
         func.count(Conversion.id).label("conversions"),
         func.sum(approved).label("approved_conversions"),
+        func.count(
+            func.distinct(case((Conversion.status == "approved", Click.id), else_=None))
+        ).label("approved_unique_clicks"),
     ]
     if user.role not in {"affiliate", "publisher"}:
         columns.append(
@@ -205,6 +290,8 @@ def grouped(
     query = scope(query, user, filters)
     if filters.status:
         query = query.where(Conversion.status == filters.status)
+    if filters.event_key:
+        query = query.where(Conversion.event_key == filters.event_key)
     return [
         serialize(row)
         for row in db.execute(
@@ -226,7 +313,7 @@ def cell(value):
 
 @router.get("/export/{dataset}")
 def export(
-    dataset: Literal["clicks", "conversions"],
+    dataset: Literal["clicks", "conversions", "impressions"],
     db: DB,
     user: Actor,
     filters: FilterDep,

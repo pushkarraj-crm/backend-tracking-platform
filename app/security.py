@@ -4,7 +4,7 @@ import threading
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
 import jwt
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pwdlib import PasswordHash
 from sqlalchemy.orm import Session
@@ -70,13 +70,19 @@ def token_for(user: User, session_id: str):
 
 
 def current_user(
-    db: DB, credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)]
+    request: Request,
+    db: DB,
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
 ):
     error = HTTPException(
         401, "Invalid or expired credentials", headers={"WWW-Authenticate": "Bearer"}
     )
     if not credentials:
         raise error
+    if credentials.credentials.startswith("rk_"):
+        from .network_access import api_user
+
+        return authorized_account(db, api_user(db, credentials.credentials, request), request)
     claims = None
     for secret in filter(None, (get_settings().jwt_secret, get_settings().jwt_previous_secret)):
         try:
@@ -114,6 +120,10 @@ def current_user(
         or utc(session.expires_at) <= datetime.now(timezone.utc)
     ):
         raise error
+    return authorized_account(db, user, request)
+
+
+def authorized_account(db, user, request):
     workspace = db.get(Workspace, user.workspace_id)
     if not workspace or not workspace.active:
         raise HTTPException(403, "Workspace is suspended")
@@ -123,6 +133,9 @@ def current_user(
             raise HTTPException(403, "Parent affiliate is disabled")
     if get_settings().require_email_verification and not user.email_verified:
         raise HTTPException(403, "Verify your email before continuing")
+    from .network_access import employee_permission
+
+    employee_permission(user, request)
     return user
 
 

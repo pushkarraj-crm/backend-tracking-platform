@@ -73,7 +73,15 @@ def dispatch(kind, encrypted_payload, event_id, workspace_id):
             endpoint = db.get(WebhookEndpoint, payload["endpoint_id"])
             if not endpoint or endpoint.workspace_id != workspace_id or not endpoint.active:
                 return
-            deliver_webhook(endpoint.url, decrypt(endpoint.secret), event_id, payload["event"])
+            from .callbacks import stored_url
+
+            return deliver_webhook(
+                stored_url(endpoint),
+                decrypt(endpoint.secret),
+                event_id,
+                payload["event"],
+                method=endpoint.method,
+            )
     elif kind == "billing":
         with SessionLocal.begin() as db:
             workspace = db.scalar(
@@ -93,10 +101,15 @@ def run_once():
         return False
     event_id, lease, kind, payload, workspace_id = claimed
     error = None
+    http_status = None
     try:
-        dispatch(kind, payload, event_id, workspace_id)
+        http_status = dispatch(kind, payload, event_id, workspace_id)
     except Exception as exception:
         error = type(exception).__name__
+        from .delivery import WebhookResponseError
+
+        if isinstance(exception, WebhookResponseError):
+            http_status = exception.status
     with SessionLocal.begin() as db:
         event = db.scalar(
             select(OutboxEvent)
@@ -110,6 +123,7 @@ def run_once():
         if not event:
             return True
         event.last_error = error
+        event.http_status = http_status if isinstance(http_status, int) else None
         event.lease_until = None
         event.lease_token = None
         if error:

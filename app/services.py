@@ -83,7 +83,12 @@ def audit(db, user, action, resource_id, detail=""):
     )
 
 
-def enqueue(db, workspace_id, kind, payload):
-    event = OutboxEvent(workspace_id=workspace_id, kind=kind, payload=encrypt(json.dumps(payload)))
+def enqueue(db, workspace_id, kind, payload, recipient_id=None):
+    event = OutboxEvent(
+        workspace_id=workspace_id,
+        kind=kind,
+        payload=encrypt(json.dumps(payload)),
+        recipient_id=recipient_id,
+    )
     db.add(event)
     return event

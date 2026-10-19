@@ -56,6 +56,7 @@ class Workspace(Base):
     teams_email: Mapped[str | None] = mapped_column(String(254))
     preferred_language: Mapped[str] = mapped_column(String(5), default="en", server_default="en")
     referral_source: Mapped[str | None] = mapped_column(String(40))
+    branding: Mapped[dict] = mapped_column(JSON, default=dict, server_default="{}")
 
 
 class User(Base):
@@ -80,6 +81,8 @@ class User(Base):
     full_name: Mapped[str | None] = mapped_column(String(120))
     consent_version: Mapped[str | None] = mapped_column(String(40))
     consent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    api_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    staff_permissions: Mapped[list | None] = mapped_column(JSON)
 
 
 class Offer(Base):
@@ -106,6 +109,7 @@ class Offer(Base):
     )
     sale_percentage: Mapped[Decimal | None] = mapped_column(Numeric(7, 4))
     description: Mapped[str] = mapped_column(Text, default="", server_default="")
+    catalog_settings: Mapped[dict] = mapped_column(JSON, default=dict, server_default="{}")
 
 
 class TrackingLink(Base):
@@ -143,6 +147,7 @@ class Click(Base):
     )
     language: Mapped[str | None] = mapped_column(String(10))
     ip_hash: Mapped[str | None] = mapped_column(String(64), index=True)
+    attributes: Mapped[dict] = mapped_column(JSON, default=dict, server_default="{}")
 
 
 class Conversion(Base):
@@ -150,8 +155,20 @@ class Conversion(Base):
     __table_args__ = (
         ForeignKeyConstraint(["workspace_id", "click_id"], ["clicks.workspace_id", "clicks.id"]),
         ForeignKeyConstraint(["workspace_id", "offer_id"], ["offers.workspace_id", "offers.id"]),
-        UniqueConstraint("workspace_id", "offer_id", "transaction_id"),
-        UniqueConstraint("workspace_id", "click_id"),
+        UniqueConstraint(
+            "workspace_id",
+            "offer_id",
+            "event_key",
+            "transaction_id",
+            name="uq_conversion_event_transaction",
+        ),
+        UniqueConstraint(
+            "workspace_id",
+            "click_id",
+            "event_key",
+            "deduplication_key",
+            name="uq_conversion_event_click",
+        ),
         UniqueConstraint("workspace_id", "id"),
         Index("ix_conversion_workspace_created", "workspace_id", "created_at"),
     )
@@ -168,6 +185,10 @@ class Conversion(Base):
     version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     event_type: Mapped[str | None] = mapped_column(String(10))
     sale_amount: Mapped[Decimal | None] = mapped_column(Numeric(14, 4))
+    event_key: Mapped[str] = mapped_column(String(64), default="initial", server_default="initial")
+    deduplication_key: Mapped[str] = mapped_column(String(120), default="", server_default="")
+    advertiser_parameters: Mapped[dict] = mapped_column(JSON, default=dict, server_default="{}")
+    pricing_snapshot: Mapped[dict] = mapped_column(JSON, default=dict, server_default="{}")
 
 
 class AuditEvent(Base):
@@ -209,19 +230,33 @@ class WebhookEndpoint(Base):
     __tablename__ = "webhook_endpoints"
     __table_args__ = (
         ForeignKeyConstraint(["workspace_id", "affiliate_id"], ["users.workspace_id", "users.id"]),
-        UniqueConstraint("workspace_id", "affiliate_id"),
+        ForeignKeyConstraint(["workspace_id", "offer_id"], ["offers.workspace_id", "offers.id"]),
+        UniqueConstraint("workspace_id", "affiliate_id", "offer_id", name="uq_callback_campaign"),
+        Index(
+            "uq_callback_global",
+            "workspace_id",
+            "affiliate_id",
+            unique=True,
+            postgresql_where=text("offer_id IS NULL"),
+            sqlite_where=text("offer_id IS NULL"),
+        ),
     )
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=identifier)
     workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
     affiliate_id: Mapped[str] = mapped_column(String(32))
-    url: Mapped[str] = mapped_column(String(2048))
+    url: Mapped[str] = mapped_column(Text)
     secret: Mapped[str] = mapped_column(Text)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+    offer_id: Mapped[str | None] = mapped_column(String(32))
+    method: Mapped[str] = mapped_column(String(4), default="POST", server_default="POST")
 
 
 class OutboxEvent(Base):
     __tablename__ = "outbox_events"
-    __table_args__ = (Index("ix_outbox_dispatch", "status", "available_at"),)
+    __table_args__ = (
+        Index("ix_outbox_dispatch", "status", "available_at"),
+        ForeignKeyConstraint(["workspace_id", "recipient_id"], ["users.workspace_id", "users.id"]),
+    )
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=identifier)
     workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
     kind: Mapped[str] = mapped_column(String(20))
@@ -233,6 +268,8 @@ class OutboxEvent(Base):
     lease_token: Mapped[str | None] = mapped_column(String(32))
     last_error: Mapped[str | None] = mapped_column(String(80))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    recipient_id: Mapped[str | None] = mapped_column(String(32), index=True)
+    http_status: Mapped[int | None] = mapped_column(Integer)
 
 
 class BillingEvent(Base):

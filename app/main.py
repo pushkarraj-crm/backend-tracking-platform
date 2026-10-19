@@ -25,6 +25,11 @@ from .tenancy import CompanyMiddleware
 from .campaigns import router as campaign_router
 from .invoices import router as invoice_router
 from .landing import router as landing_router
+from .network import router as network_router
+from .network_account import router as network_account_router
+from .web_tracking import router as web_tracking_router
+from .callbacks import router as callbacks_router
+from .network_tools import router as network_tools_router
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 
@@ -76,6 +81,11 @@ app.include_router(automated_payouts_router)
 app.include_router(campaign_router)
 app.include_router(invoice_router)
 app.include_router(landing_router)
+app.include_router(network_router)
+app.include_router(network_account_router)
+app.include_router(web_tracking_router)
+app.include_router(callbacks_router)
+app.include_router(network_tools_router)
 
 
 @app.exception_handler(RequestValidationError)

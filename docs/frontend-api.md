@@ -72,3 +72,8 @@ List APIs accept `offset` and `limit` (maximum 100). Money is returned as decima
 ## Current self-service campaigns
 
 Use `/campaigns`, `/campaign-applications`, `/landing-pages`, `/publisher-invoices` and `/publisher-postback` as described in [the integration guide](campaigns-invoices-postbacks.md). Admin-created publishers can have no parent affiliate. Automated fund transfers and manual payout recording are retired. Advertisers pay publishers externally and publishers confirm receipt through invoices.
+
+
+## Network operations extension
+
+See [network operations API](network-operations-api.md), [provider and S2S setup](network-integrations.md), and [Offer18 reference review](offer18-feature-review.md). Provider settings are configuration drafts; live provider adapters remain disabled.

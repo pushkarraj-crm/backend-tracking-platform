@@ -4,6 +4,7 @@ from app.config import get_settings
 from app.db import Base
 from app import models  # noqa: F401 -- register every mapped table before schema comparison
 from app import tenancy  # noqa: F401 -- register control-plane directory tables
+from app import network_models  # noqa: F401 -- register network operations tables
 
 config = context.config
 target_metadata = Base.metadata

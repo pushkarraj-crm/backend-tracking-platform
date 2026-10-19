@@ -180,19 +180,23 @@ def configure_webhook(body: WebhookBody, db: DB, user: Actor):
         select(WebhookEndpoint).where(
             WebhookEndpoint.workspace_id == user.workspace_id,
             WebhookEndpoint.affiliate_id == affiliate.id,
+            WebhookEndpoint.offer_id.is_(None),
         )
     )
     raw = secrets.token_urlsafe(48)
     if endpoint is None:
         endpoint = WebhookEndpoint(workspace_id=user.workspace_id, affiliate_id=affiliate.id)
         db.add(endpoint)
-    endpoint.url = str(body.url)
+    from .callbacks import store_url
+
+    endpoint.url = store_url(str(body.url))
+    endpoint.method = "POST"
     endpoint.secret = encrypt(raw)
     endpoint.active = True
     db.flush()
     audit(db, user, "webhook.configured", endpoint.id)
     db.commit()
-    return {"id": endpoint.id, "secret": raw, "url": endpoint.url}
+    return {"id": endpoint.id, "secret": raw, "url": str(body.url)}
 
 
 @router.get("/deliveries")

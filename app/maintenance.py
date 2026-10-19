@@ -46,6 +46,9 @@ def run_once():
                     {"subscription_id": workspace.razorpay_subscription_id},
                 )
             workspace.next_billing_check_at = now() + timedelta(minutes=15)
+        from .network_tools import run_automations
+
+        run_automations(db)
         # Expired velocity buckets are operational state, not financial history.
         db.execute(delete(FraudCounter).where(FraudCounter.minute < int(time.time()) // 60 - 1440))
     revalidate_domains()

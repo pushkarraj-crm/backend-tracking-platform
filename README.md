@@ -73,3 +73,8 @@ Measure staging traffic with `scripts/load_test.py --url <staging-tracking-url> 
 This repository contains the backend only, including targeting, caps, rule-based fraud detection, advertiser landing/tracking domains, direct publisher invoices, reporting/export APIs, and subscription lifecycle reconciliation. Live DigitalOcean deployment, DNS/TLS issuance, SMTP delivery, Razorpay subscription authorization/renewals, and backups/restore still require verification with your actual service configuration before admitting paying customers. Contract tests do not prove live provider integration or production capacity.
 
 See [campaigns, invoices, advertiser domains and S2S integration](docs/campaigns-invoices-postbacks.md) for the current product workflow and ad-URL configuration limits.
+
+
+## Network operations extension
+
+See [network operations API](docs/network-operations-api.md), [provider and S2S setup](docs/network-integrations.md), and [Offer18 reference review](docs/offer18-feature-review.md). Provider settings are configuration drafts; live provider adapters remain disabled.

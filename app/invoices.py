@@ -102,7 +102,7 @@ def output(invoice):
     return result
 
 
-def eligible_query(user):
+def eligible_query(user, status="approved"):
     query = (
         select(Conversion, Offer.advertiser_id, TrackingLink.affiliate_id)
         .join(Offer, Conversion.offer_id == Offer.id)
@@ -110,7 +110,7 @@ def eligible_query(user):
         .join(TrackingLink, TrackingLink.id == Click.link_id)
         .where(
             Conversion.workspace_id == user.workspace_id,
-            Conversion.status == "approved",
+            Conversion.status == status,
             Offer.campaign_model.in_(["CPL", "CPS"]),
             Offer.advertiser_id.is_not(None),
             Conversion.payout > 0,
@@ -168,6 +168,11 @@ def summary(db: DB, user: Actor):
         {"currency": currency, "status": status, "amount": str(amount)}
         for currency, status, amount in groups
     ]
+    pending = eligible_query(user, status="pending").subquery()
+    for currency, amount in db.execute(
+        select(pending.c.currency, func.sum(pending.c.payout)).group_by(pending.c.currency)
+    ):
+        result.append({"currency": currency, "status": "pending_approval", "amount": str(amount)})
     payable = eligible_query(user).subquery()
     for currency, amount in db.execute(
         select(payable.c.currency, func.sum(payable.c.payout)).group_by(payable.c.currency)
@@ -272,6 +277,17 @@ def event(db, user, invoice, action, detail, evidence=None):
         )
     )
     audit(db, user, "invoice." + action, invoice.id)
+    from .network_account import notify
+
+    notify(
+        db,
+        user.workspace_id,
+        [invoice.advertiser_id, invoice.publisher_id],
+        "invoice.updated",
+        "Publisher invoice updated",
+        action,
+        invoice.id,
+    )
 
 
 @router.get("")

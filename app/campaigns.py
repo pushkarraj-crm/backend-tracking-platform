@@ -5,7 +5,7 @@ from typing import Literal
 from decimal import Decimal
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import Field, HttpUrl, model_validator
-from sqlalchemy import select
+from sqlalchemy import select, or_
 from sqlalchemy.exc import IntegrityError
 from .schemas import StrictModel, OfferCreate, ActiveUpdate
 from .security import DB, Actor, key_hash
@@ -13,6 +13,7 @@ from .models import Offer, User, CampaignApplication, TrackingLink, WebhookEndpo
 from .routes import owned, entitled, output_offer, quota, rotate_key
 from .services import audit
 from .domains import link_base
+from .config import get_settings
 
 router = APIRouter(tags=["Campaigns and applications"])
 
@@ -26,6 +27,9 @@ class CampaignBody(OfferCreate):
 
     @model_validator(mode="after")
     def rate(self):
+        from .campaign_policy import safe_url
+
+        safe_url(self.destination_url, templates=True)
         if self.destination_url.scheme != "https":
             raise ValueError("Campaign destinations must use HTTPS")
         if self.campaign_model == "CPS" and self.sale_percentage is None:
@@ -65,6 +69,9 @@ def manage_campaign(db, user, campaign_id, lock=False):
 
 def campaign_output(campaign, user):
     result = output_offer(campaign)
+    from .campaign_policy import public_settings
+
+    result["settings"] = public_settings(campaign, user)
     result.update(
         campaign_model=campaign.campaign_model,
         sale_percentage=str(campaign.sale_percentage)
@@ -78,8 +85,7 @@ def campaign_output(campaign, user):
     return result
 
 
-@router.post("/campaigns", status_code=201)
-def new_campaign(body: CampaignBody, db: DB, user: Actor):
+def create_campaign_record(body, db, user):
     if user.role not in {"advertiser", "admin", "staff"}:
         raise HTTPException(403, "Advertiser access required")
     if user.role != "advertiser" and not body.advertiser_id:
@@ -103,6 +109,12 @@ def new_campaign(body: CampaignBody, db: DB, user: Actor):
     db.add(campaign)
     db.flush()
     audit(db, user, "campaign.created", campaign.id)
+    return campaign, key
+
+
+@router.post("/campaigns", status_code=201)
+def new_campaign(body: CampaignBody, db: DB, user: Actor):
+    campaign, key = create_campaign_record(body, db, user)
     db.commit()
     return {**campaign_output(campaign, user), "postback_key": key}
 
@@ -118,7 +130,24 @@ def catalog(
     if user.role == "advertiser":
         query = query.where(Offer.advertiser_id == user.id)
     elif user.role in {"publisher", "affiliate"}:
-        query = query.where(Offer.active.is_(True))
+        private_access = (
+            select(CampaignApplication.id)
+            .where(
+                CampaignApplication.workspace_id == user.workspace_id,
+                CampaignApplication.offer_id == Offer.id,
+                CampaignApplication.publisher_id == user.id,
+                CampaignApplication.status == "approved",
+            )
+            .exists()
+        )
+        query = query.where(
+            Offer.active.is_(True),
+            or_(
+                Offer.catalog_settings["visibility"].as_string().is_(None),
+                Offer.catalog_settings["visibility"].as_string() != "private",
+                private_access,
+            ),
+        )
     elif user.role not in {"admin", "staff"}:
         raise HTTPException(403, "Campaign access required")
     return [
@@ -164,16 +193,41 @@ def apply(campaign_id: str, body: ApplicationBody, db: DB, user: Actor):
     )
     if existing:
         return application_output(existing)
+    from .campaign_policy import policy
+
+    visibility = policy(campaign).visibility
+    if visibility == "private":
+        raise HTTPException(404, "Campaign not found")
     application = CampaignApplication(
         workspace_id=user.workspace_id,
         offer_id=campaign_id,
         publisher_id=user.id,
         message=body.message,
+        status="approved" if visibility == "open" else "pending",
     )
     db.add(application)
     try:
         db.flush()
         audit(db, user, "campaign.applied", application.id)
+        from .network_account import notify, notify_admins
+
+        notify(
+            db,
+            user.workspace_id,
+            [campaign.advertiser_id],
+            "campaign.application",
+            "Publisher campaign application",
+            campaign.name,
+            application.id,
+        )
+        notify_admins(
+            db,
+            user.workspace_id,
+            "campaign.application",
+            "Publisher campaign application",
+            campaign.name,
+            application.id,
+        )
         db.commit()
     except IntegrityError:
         db.rollback()
@@ -239,6 +293,17 @@ def review(application_id: str, body: ReviewBody, db: DB, user: Actor):
     manage_campaign(db, user, row.offer_id)
     row.status, row.review_note, row.reviewed_by = body.status, body.note, user.id
     audit(db, user, "campaign.application_reviewed", row.id, body.status)
+    from .network_account import notify
+
+    notify(
+        db,
+        user.workspace_id,
+        [row.publisher_id],
+        "campaign.access",
+        "Campaign application reviewed",
+        body.status,
+        row.offer_id,
+    )
     db.commit()
     return application_output(row)
 
@@ -300,6 +365,9 @@ def publisher_link(
     return {
         "id": link.id,
         "url": f"{base}/t/{link.id}",
+        "capture_url": f"{base}/capture/{link.id}",
+        "impression_url": f"{base}/i/{link.id}",
+        "sdk_url": get_settings().public_base_url.rstrip("/") + "/sdk/relay.js",
         "final_urls": [
             f"https://{domain.hostname}/l/{page.slug}?link={link.id}"
             for page, domain in pages
@@ -320,9 +388,12 @@ def publisher_postback(db: DB, user: Actor):
         select(WebhookEndpoint).where(
             WebhookEndpoint.workspace_id == user.workspace_id,
             WebhookEndpoint.affiliate_id == user.id,
+            WebhookEndpoint.offer_id.is_(None),
         )
     )
-    return {"url": row.url if row else None, "active": row.active if row else False}
+    from .callbacks import stored_url
+
+    return {"url": stored_url(row) if row else None, "active": row.active if row else False}
 
 
 @router.put("/publisher-postback")
@@ -341,6 +412,10 @@ def campaign_domains(campaign_id: str, db: DB, user: Actor):
 
     entitled(db, user)
     campaign = owned(db, Offer, campaign_id, user)
+    from .campaign_policy import can_discover
+
+    if not can_discover(db, user, campaign):
+        raise HTTPException(404, "Campaign not found")
     if user.role == "advertiser" and campaign.advertiser_id != user.id:
         raise HTTPException(404, "Campaign not found")
     if user.role not in {"admin", "staff", "advertiser", "publisher"}:
