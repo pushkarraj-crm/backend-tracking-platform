@@ -15,7 +15,7 @@
     tls {
         on_demand
     }
-    @tracking path /t/*
+    @tracking path /t/* /l/* /c/*
     handle @tracking {
         reverse_proxy api:8000
     }

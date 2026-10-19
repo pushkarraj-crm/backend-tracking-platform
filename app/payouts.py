@@ -2,11 +2,9 @@ from decimal import Decimal
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import Field
 from sqlalchemy import select, func, union_all
-from sqlalchemy.exc import IntegrityError
-from .models import User, Workspace, CommissionEntry, Payout, PayoutRequest, PayoutAdjustment
+from .models import CommissionEntry, Payout, PayoutRequest, PayoutAdjustment
 from .security import DB, Actor, staff_only
 from .schemas import StrictModel
-from .services import entitlement, audit
 from .routes import visible_users
 
 router = APIRouter(prefix="/payouts", tags=["Payouts"])
@@ -90,35 +88,4 @@ def payout_history(
 
 @router.post("", status_code=201)
 def record_payout(body: PayoutBody, db: DB, user: Actor):
-    staff_only(user)
-    entitlement(db.get(Workspace, user.workspace_id))
-    affiliate = db.scalar(
-        select(User)
-        .where(User.id == body.affiliate_id, User.workspace_id == user.workspace_id)
-        .with_for_update()
-    )
-    if not affiliate or affiliate.role not in {"affiliate", "publisher"}:
-        raise HTTPException(404, "Commission account not found")
-    records = entries(user)
-    balance = db.scalar(
-        select(func.coalesce(func.sum(records.c.amount), 0)).where(
-            records.c.affiliate_id == affiliate.id, records.c.currency == body.currency
-        )
-    )
-    if body.amount > balance:
-        raise HTTPException(409, "Payout exceeds the available commission balance")
-    payout = Payout(workspace_id=user.workspace_id, recorded_by=user.id, **body.model_dump())
-    db.add(payout)
-    try:
-        db.flush()
-        audit(db, user, "payout.recorded", payout.id, body.reference)
-        db.commit()
-    except IntegrityError:
-        db.rollback()
-        raise HTTPException(409, "Payout reference already recorded")
-    return {
-        "id": payout.id,
-        "amount": str(payout.amount),
-        "currency": payout.currency,
-        "reference": payout.reference,
-    }
+    raise HTTPException(410, "Use publisher invoices and external payment confirmation")

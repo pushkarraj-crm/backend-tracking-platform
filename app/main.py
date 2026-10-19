@@ -22,6 +22,9 @@ from .domains import router as domains_router, DomainHostMiddleware
 from .reporting import router as reporting_router
 from .automated_payouts import router as automated_payouts_router
 from .tenancy import CompanyMiddleware
+from .campaigns import router as campaign_router
+from .invoices import router as invoice_router
+from .landing import router as landing_router
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 
@@ -70,6 +73,9 @@ app.include_router(tracking_router)
 app.include_router(domains_router)
 app.include_router(reporting_router)
 app.include_router(automated_payouts_router)
+app.include_router(campaign_router)
+app.include_router(invoice_router)
+app.include_router(landing_router)
 
 
 @app.exception_handler(RequestValidationError)

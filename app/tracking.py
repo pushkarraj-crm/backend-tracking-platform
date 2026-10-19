@@ -65,8 +65,12 @@ def set_rules(offer_id: str, body: Rules, db: DB, user: Actor):
     from .routes import owned, entitled
 
     entitled(db, user)
-    staff_only(user)
     offer = owned(db, Offer, offer_id, user)
+    if user.role == "advertiser":
+        if offer.advertiser_id != user.id:
+            raise HTTPException(404, "Campaign not found")
+    else:
+        staff_only(user)
     offer.tracking_rules = body.model_dump(mode="json")
     audit(db, user, "offer.rules", offer.id)
     db.commit()
@@ -77,10 +81,13 @@ def set_rules(offer_id: str, body: Rules, db: DB, user: Actor):
 def get_rules(offer_id: str, db: DB, user: Actor):
     from .routes import owned
 
-    staff_only(user)
-    return Rules.model_validate(owned(db, Offer, offer_id, user).tracking_rules).model_dump(
-        mode="json"
-    )
+    offer = owned(db, Offer, offer_id, user)
+    if user.role == "advertiser":
+        if offer.advertiser_id != user.id:
+            raise HTTPException(404, "Campaign not found")
+    else:
+        staff_only(user)
+    return Rules.model_validate(offer.tracking_rules).model_dump(mode="json")
 
 
 def insert_once(db, model, values, columns):
@@ -91,7 +98,8 @@ def insert_once(db, model, values, columns):
     db.execute(insert(model).values(**values).on_conflict_do_nothing(index_elements=columns))
 
 
-def reserve(db, offer, kind, at):
+def reserve(db, offer, kind, at, revenue=None):
+    revenue = offer.revenue if revenue is None else revenue
     rules = Rules.model_validate(offer.tracking_rules)
     for period in (at.astimezone(timezone.utc).date().isoformat(), "total"):
         insert_once(
@@ -121,8 +129,8 @@ def reserve(db, offer, kind, at):
         if kind == "conversions":
             budget = rules.total_revenue if period == "total" else rules.daily_revenue
             if budget is not None:
-                criteria.append(OfferCounter.revenue + offer.revenue <= budget)
-            values["revenue"] = OfferCounter.revenue + offer.revenue
+                criteria.append(OfferCounter.revenue + revenue <= budget)
+            values["revenue"] = OfferCounter.revenue + revenue
         if db.execute(update(OfferCounter).where(*criteria).values(**values)).rowcount != 1:
             db.rollback()
             raise HTTPException(409, "Offer cap reached")

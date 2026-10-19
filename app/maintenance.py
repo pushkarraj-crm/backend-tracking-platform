@@ -6,9 +6,8 @@ import time
 from datetime import timedelta
 from sqlalchemy import select, delete
 from .db import SessionLocal
-from .models import Workspace, OutboxEvent, PayoutRequest, FraudCounter, now
+from .models import Workspace, OutboxEvent, FraudCounter, now
 from .services import enqueue
-from .automated_payouts import schedule
 from .domains import revalidate_domains
 
 stopping = False
@@ -17,21 +16,6 @@ logger = logging.getLogger("affiliate.maintenance")
 
 def run_once():
     with SessionLocal.begin() as db:
-        schedule(db)
-        requests = list(
-            db.scalars(
-                select(PayoutRequest)
-                .where(
-                    PayoutRequest.status == "processing",
-                    PayoutRequest.updated_at < now() - timedelta(minutes=5),
-                )
-                .with_for_update(skip_locked=True)
-                .limit(100)
-            )
-        )
-        for request in requests:
-            enqueue(db, request.workspace_id, "payout", {"request_id": request.id})
-            request.updated_at = now()
         subscriptions = list(
             db.scalars(
                 select(Workspace)

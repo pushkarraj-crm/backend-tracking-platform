@@ -787,7 +787,7 @@ def test_signup_contact_fields_and_validation(client):
         assert client.post("/auth/register", json={**body, **changes}).status_code == 422
 
 
-def test_commission_reversals_and_payout_limits(client):
+def test_commission_reversals_and_retired_payouts(client):
     from app.models import CommissionEntry
 
     headers, admin = register(client)
@@ -807,13 +807,13 @@ def test_commission_reversals_and_payout_limits(client):
         "currency": "USD",
         "reference": "bank-001",
     }
-    assert client.post("/payouts", headers=headers, json=body).status_code == 201
+    assert client.post("/payouts", headers=headers, json=body).status_code == 410
     assert (
         client.post("/payouts", headers=headers, json={**body, "reference": "bank-002"}).status_code
-        == 409
+        == 410
     )
     assert client.patch(endpoint, headers=headers, json={"status": "rejected"}).status_code == 200
-    assert client.get("/payouts/balances", headers=headers).json()[0]["balance"] == "-7.2500"
+    assert client.get("/payouts/balances", headers=headers).json()[0]["balance"] == "0.0000"
     with SessionLocal() as db:
         assert len(list(db.scalars(select(CommissionEntry)))) == 2
 
@@ -1166,115 +1166,6 @@ def test_detailed_reports_exports_and_role_visibility(client):
     )
 
 
-def prepare_automated_payout(client, headers, admin, monkeypatch):
-    from app import automated_payouts
-
-    affiliate, offer, link, click_id = setup_offer(client, headers)
-    # Create actual INR commissions through a conversion and approval.
-    with SessionLocal.begin() as db:
-        from app.models import Offer
-
-        row = db.get(Offer, offer["id"])
-        row.currency = "INR"
-        row.payout = 100
-        row.revenue = 150
-    conversion = client.post(
-        "/postbacks/" + offer["id"],
-        headers={"X-Postback-Key": offer["postback_key"]},
-        json={"click_id": click_id, "transaction_id": "auto-fund"},
-    ).json()
-    client.patch("/conversions/" + conversion["id"], headers=headers, json={"status": "approved"})
-    body = {
-        "key_id": "rzp_test_network",
-        "key_secret": "network-secret-123",
-        "account_number": "1234567890",
-        "webhook_secret": "network-webhook-secret-" * 3,
-        "minimum_amount": "1",
-        "interval_hours": 1,
-    }
-    provider = client.put("/automated-payouts/provider", headers=headers, json=body)
-    assert provider.status_code == 200, provider.text
-    monkeypatch.setattr(
-        automated_payouts,
-        "provider_call",
-        lambda credentials, method, path, **kwargs: {"id": "fa_network"},
-    )
-    assert (
-        client.put(
-            "/automated-payouts/beneficiaries",
-            headers=headers,
-            json={"affiliate_id": affiliate["id"], "fund_account_id": "fa_network"},
-        ).status_code
-        == 200
-    )
-    return affiliate, provider.json()
-
-
-def test_automated_payout_reservation_idempotency_processing_and_reversal(client, monkeypatch):
-    from app import automated_payouts
-    from app.models import Payout, PayoutAdjustment
-
-    headers, admin = register(client)
-    affiliate, provider = prepare_automated_payout(client, headers, admin, monkeypatch)
-    body = {
-        "affiliate_id": affiliate["id"],
-        "amount": "60.00",
-        "request_key": "a-stable-request-key-1",
-    }
-    response = client.post("/automated-payouts/requests", headers=headers, json=body)
-    assert response.status_code == 202, response.text
-    request_id = response.json()["id"]
-    assert (
-        client.post("/automated-payouts/requests", headers=headers, json=body).json()["id"]
-        == request_id
-    )
-    assert (
-        client.post(
-            "/automated-payouts/requests",
-            headers=headers,
-            json={**body, "request_key": "second-request-key", "amount": "60"},
-        ).status_code
-        == 409
-    )
-    assert client.get("/payouts/balances", headers=headers).json()[0]["balance"] == "40.0000"
-    calls = []
-
-    def provider_call(credentials, method, path, body=None, idempotency=None):
-        calls.append(idempotency)
-        return {
-            "id": "pout_network",
-            "fund_account_id": "fa_network",
-            "status": "processed",
-            "amount": 6000,
-            "currency": "INR",
-        }
-
-    monkeypatch.setattr(automated_payouts, "provider_call", provider_call)
-    with SessionLocal.begin() as db:
-        automated_payouts.process(db, request_id, admin["workspace_id"])
-    with SessionLocal.begin() as db:
-        automated_payouts.process(db, request_id, admin["workspace_id"])
-    assert calls[0] == request_id
-    with SessionLocal() as db:
-        assert len(list(db.scalars(select(Payout)))) == 1
-    monkeypatch.setattr(
-        automated_payouts,
-        "provider_call",
-        lambda *args, **kwargs: {
-            "id": "pout_network",
-            "fund_account_id": "fa_network",
-            "status": "reversed",
-            "amount": 6000,
-            "currency": "INR",
-        },
-    )
-    with SessionLocal.begin() as db:
-        automated_payouts.process(db, request_id, admin["workspace_id"])
-    assert client.get("/payouts/balances", headers=headers).json()[0]["balance"] == "100.0000"
-    with SessionLocal() as db:
-        assert len(list(db.scalars(select(PayoutAdjustment)))) == 1
-
-
 def test_billing_activation_renewal_grace_halt_resume_cancel(client, monkeypatch):
     from app import billing
     from app.config import get_settings
@@ -1313,150 +1204,6 @@ def test_billing_activation_renewal_grace_halt_resume_cancel(client, monkeypatch
     state["status"] = "cancelled"
     client.post("/billing/reconcile", headers=headers)
     assert client.get("/offers", headers=headers).status_code == 402
-
-
-def test_payout_timeouts_retry_same_provider_key(client, monkeypatch):
-    from app import automated_payouts, worker
-    from app.models import PayoutRequest, Payout, OutboxEvent, now
-    import httpx
-
-    headers, admin = register(client)
-    affiliate, provider = prepare_automated_payout(client, headers, admin, monkeypatch)
-    body = {"affiliate_id": affiliate["id"], "amount": "60.00", "request_key": "timeout-stable-key"}
-    request_id = client.post("/automated-payouts/requests", headers=headers, json=body).json()["id"]
-    keys = []
-
-    def timeout(credentials, method, path, body=None, idempotency=None):
-        keys.append(idempotency)
-        raise httpx.ReadTimeout("provider response lost")
-
-    monkeypatch.setattr(automated_payouts, "provider_call", timeout)
-    for _ in range(2):
-        assert worker.run_once()
-        with SessionLocal.begin() as db:
-            request = db.get(PayoutRequest, request_id)
-            assert request.provider_id is None and request.status == "queued"
-            db.get(OutboxEvent, request.outbox_id).available_at = now()
-    assert keys == [request_id, request_id]
-    assert (
-        client.post(
-            "/automated-payouts/requests/" + request_id + "/cancel", headers=headers
-        ).status_code
-        == 409
-    )
-    monkeypatch.setattr(
-        automated_payouts,
-        "provider_call",
-        lambda *args, **kwargs: {
-            "id": "pout_retry",
-            "fund_account_id": "fa_network",
-            "status": "processed",
-            "amount": 6000,
-            "currency": "INR",
-        },
-    )
-    assert worker.run_once()
-    with SessionLocal() as db:
-        rows = list(db.scalars(select(Payout)))
-        assert len(rows) == 1 and rows[0].recorded_by == admin["id"]
-
-
-def test_payout_cancellation_releases_unsubmitted_reservation(client, monkeypatch):
-    from app import worker
-
-    headers, admin = register(client)
-    affiliate, provider = prepare_automated_payout(client, headers, admin, monkeypatch)
-    request_id = client.post(
-        "/automated-payouts/requests",
-        headers=headers,
-        json={
-            "affiliate_id": affiliate["id"],
-            "amount": "60.00",
-            "request_key": "cancel-stable-key",
-        },
-    ).json()["id"]
-    assert (
-        client.post(
-            "/automated-payouts/requests/" + request_id + "/cancel", headers=headers
-        ).status_code
-        == 200
-    )
-    assert client.get("/payouts/balances", headers=headers).json()[0]["balance"] == "100.0000"
-    assert not worker.run_once()
-
-
-def test_payout_automation_schedule_and_network_isolation(client, monkeypatch):
-    from app import automated_payouts
-    from app.models import PayoutProvider, PayoutRequest, now
-    from datetime import timedelta
-
-    headers, admin = register(client)
-    affiliate, provider = prepare_automated_payout(client, headers, admin, monkeypatch)
-    with SessionLocal.begin() as db:
-        configuration = db.scalar(select(PayoutProvider))
-        configuration.automatic = True
-        configuration.next_run_at = now() - timedelta(minutes=1)
-    with SessionLocal.begin() as db:
-        automated_payouts.schedule(db)
-    with SessionLocal.begin() as db:
-        automated_payouts.schedule(db)
-    with SessionLocal() as db:
-        assert len(list(db.scalars(select(PayoutRequest)))) == 1
-    other_headers, other = register(client, "Payout Other Network")
-    assert client.get("/automated-payouts/requests", headers=other_headers).json() == []
-    assert not client.get("/automated-payouts/provider", headers=other_headers).json()["configured"]
-    assert (
-        client.post(
-            "/automated-payouts/requests",
-            headers=other_headers,
-            json={
-                "affiliate_id": affiliate["id"],
-                "amount": "1",
-                "request_key": "cross-network-key",
-            },
-        ).status_code
-        == 409
-    )
-
-
-def test_payout_webhook_signature_and_event_deduplication(client, monkeypatch):
-    import json
-    import hmac
-    import hashlib
-    from app.models import PayoutRequest, PayoutProvider
-
-    headers, admin = register(client)
-    affiliate, provider = prepare_automated_payout(client, headers, admin, monkeypatch)
-    request_id = client.post(
-        "/automated-payouts/requests",
-        headers=headers,
-        json={
-            "affiliate_id": affiliate["id"],
-            "amount": "60",
-            "request_key": "callback-stable-key",
-        },
-    ).json()["id"]
-    with SessionLocal.begin() as db:
-        record = db.get(PayoutRequest, request_id)
-        record.provider_id = "pout_callback"
-        record.status = "processing"
-        configuration = db.scalar(select(PayoutProvider))
-        url = "/automated-payouts/webhooks/" + configuration.id
-    raw = json.dumps({"payload": {"payout": {"entity": {"id": "pout_callback"}}}}).encode()
-    signature = hmac.new(("network-webhook-secret-" * 3).encode(), raw, hashlib.sha256).hexdigest()
-    event_headers = {
-        "X-Razorpay-Signature": signature,
-        "X-Razorpay-Event-Id": "callback-event-1",
-        "Content-Type": "application/json",
-    }
-    assert (
-        client.post(
-            url, content=raw, headers={**event_headers, "X-Razorpay-Signature": "invalid"}
-        ).status_code
-        == 401
-    )
-    assert client.post(url, content=raw, headers=event_headers).status_code == 200
-    assert client.post(url, content=raw, headers=event_headers).json()["duplicate"]
 
 
 def test_subscription_checkout_uses_fifteen_day_trial_and_existing_checkout(client, monkeypatch):

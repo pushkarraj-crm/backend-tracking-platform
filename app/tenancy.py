@@ -253,7 +253,7 @@ class CompanyMiddleware:
 
             slug = await run_in_threadpool(certificate_company)
         # Public S2S callbacks and tracking links have an explicit company prefix.
-        match = re.fullmatch(r"/c/([a-z0-9-]{1,63})(/(?:t/|postbacks/|billing/).*)", path)
+        match = re.fullmatch(r"/c/([a-z0-9-]{1,63})(/(?:t/|l/|postbacks/|billing/).*)", path)
         if match:
             if slug and slug != match[1]:
                 return await JSONResponse({"detail": "Company mismatch"}, 400)(scope, receive, send)
@@ -266,6 +266,14 @@ class CompanyMiddleware:
             )
         except ValueError:
             return await JSONResponse({"detail": "Invalid host"}, 400)(scope, receive, send)
+        if not slug and scope["path"].startswith(("/t/", "/l/")):
+
+            def public_domain_company():
+                with ControlSession() as db:
+                    record = db.get(CompanyHostname, host)
+                    return record.slug if record else ""
+
+            slug = await run_in_threadpool(public_domain_company)
         suffix = "." + settings.company_base_domain
         host_slug = host[: -len(suffix)] if host.endswith(suffix) else ""
         if host_slug:

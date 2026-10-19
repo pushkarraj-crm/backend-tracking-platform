@@ -101,6 +101,11 @@ class Offer(Base):
     advertiser_id: Mapped[str | None] = mapped_column(String(32))
     attribution_hours: Mapped[int] = mapped_column(Integer, default=720, server_default="720")
     tracking_rules: Mapped[dict] = mapped_column(JSON, default=dict, server_default="{}")
+    campaign_model: Mapped[str] = mapped_column(
+        String(10), default="legacy", server_default="legacy"
+    )
+    sale_percentage: Mapped[Decimal | None] = mapped_column(Numeric(7, 4))
+    description: Mapped[str] = mapped_column(Text, default="", server_default="")
 
 
 class TrackingLink(Base):
@@ -161,6 +166,8 @@ class Conversion(Base):
     currency: Mapped[str] = mapped_column(String(3))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    event_type: Mapped[str | None] = mapped_column(String(10))
+    sale_amount: Mapped[Decimal | None] = mapped_column(Numeric(14, 4))
 
 
 class AuditEvent(Base):
@@ -313,6 +320,10 @@ class FraudEvent(Base):
 
 class TrackingDomain(Base):
     __tablename__ = "tracking_domains"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "id"),
+        ForeignKeyConstraint(["workspace_id", "advertiser_id"], ["users.workspace_id", "users.id"]),
+    )
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=identifier)
     workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
     hostname: Mapped[str] = mapped_column(String(253), unique=True)
@@ -320,6 +331,128 @@ class TrackingDomain(Base):
     active: Mapped[bool] = mapped_column(Boolean, default=False)
     verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     verification_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    advertiser_id: Mapped[str | None] = mapped_column(String(32))
+    purpose: Mapped[str] = mapped_column(String(10), default="tracking", server_default="tracking")
+    tls_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class CampaignApplication(Base):
+    __tablename__ = "campaign_applications"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "offer_id", "publisher_id"),
+        ForeignKeyConstraint(["workspace_id", "offer_id"], ["offers.workspace_id", "offers.id"]),
+        ForeignKeyConstraint(["workspace_id", "publisher_id"], ["users.workspace_id", "users.id"]),
+        Index("ix_application_network_status", "workspace_id", "status"),
+    )
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=identifier)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"))
+    offer_id: Mapped[str] = mapped_column(String(32))
+    publisher_id: Mapped[str] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    message: Mapped[str] = mapped_column(String(1000), default="")
+    review_note: Mapped[str] = mapped_column(String(1000), default="")
+    reviewed_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class LandingPage(Base):
+    __tablename__ = "landing_pages"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "domain_id", "slug"),
+        ForeignKeyConstraint(["workspace_id", "offer_id"], ["offers.workspace_id", "offers.id"]),
+        ForeignKeyConstraint(
+            ["workspace_id", "domain_id"], ["tracking_domains.workspace_id", "tracking_domains.id"]
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=identifier)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"))
+    offer_id: Mapped[str] = mapped_column(String(32))
+    domain_id: Mapped[str] = mapped_column(String(32))
+    slug: Mapped[str] = mapped_column(String(100))
+    title: Mapped[str] = mapped_column(String(200))
+    body: Mapped[str] = mapped_column(Text)
+    button_text: Mapped[str] = mapped_column(String(80), default="Continue")
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class PublisherInvoice(Base):
+    __tablename__ = "publisher_invoices"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "id"),
+        UniqueConstraint("workspace_id", "publisher_id", "number"),
+        ForeignKeyConstraint(["workspace_id", "advertiser_id"], ["users.workspace_id", "users.id"]),
+        ForeignKeyConstraint(["workspace_id", "publisher_id"], ["users.workspace_id", "users.id"]),
+        CheckConstraint("amount > 0", name="ck_invoice_positive"),
+        Index("ix_invoice_advertiser_status", "workspace_id", "advertiser_id", "status"),
+        Index("ix_invoice_publisher_status", "workspace_id", "publisher_id", "status"),
+    )
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=identifier)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"))
+    advertiser_id: Mapped[str] = mapped_column(String(32))
+    publisher_id: Mapped[str] = mapped_column(String(32))
+    number: Mapped[str] = mapped_column(String(80))
+    amount: Mapped[Decimal] = mapped_column(Numeric(18, 4))
+    currency: Mapped[str] = mapped_column(String(3))
+    status: Mapped[str] = mapped_column(String(20), default="submitted")
+    payment_reference: Mapped[str | None] = mapped_column(String(200))
+    receipt_url: Mapped[str | None] = mapped_column(String(2048))
+    reported_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class InvoiceLine(Base):
+    __tablename__ = "publisher_invoice_lines"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "invoice_id", "conversion_id"),
+        ForeignKeyConstraint(
+            ["workspace_id", "invoice_id"],
+            ["publisher_invoices.workspace_id", "publisher_invoices.id"],
+        ),
+        ForeignKeyConstraint(
+            ["workspace_id", "conversion_id"], ["conversions.workspace_id", "conversions.id"]
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=identifier)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"))
+    invoice_id: Mapped[str] = mapped_column(String(32))
+    conversion_id: Mapped[str] = mapped_column(String(32))
+    amount: Mapped[Decimal] = mapped_column(Numeric(14, 4))
+
+
+class InvoiceReservation(Base):
+    __tablename__ = "publisher_invoice_reservations"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["workspace_id", "invoice_id"],
+            ["publisher_invoices.workspace_id", "publisher_invoices.id"],
+        ),
+        ForeignKeyConstraint(
+            ["workspace_id", "conversion_id"], ["conversions.workspace_id", "conversions.id"]
+        ),
+    )
+    conversion_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"))
+    invoice_id: Mapped[str] = mapped_column(String(32))
+
+
+class InvoiceEvent(Base):
+    __tablename__ = "publisher_invoice_events"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["workspace_id", "invoice_id"],
+            ["publisher_invoices.workspace_id", "publisher_invoices.id"],
+        ),
+        ForeignKeyConstraint(["workspace_id", "actor_id"], ["users.workspace_id", "users.id"]),
+    )
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=identifier)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"))
+    invoice_id: Mapped[str] = mapped_column(String(32))
+    actor_id: Mapped[str] = mapped_column(String(32))
+    action: Mapped[str] = mapped_column(String(30))
+    detail: Mapped[str] = mapped_column(String(1000), default="")
+    evidence: Mapped[dict] = mapped_column(JSON, default=dict, server_default="{}")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 

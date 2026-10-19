@@ -34,7 +34,7 @@ For a fresh Windows checkout, create `.venv`, install `requirements-lock.txt`, a
 | Tracking | Durable click IDs, placement `sub_id`, redirects, configurable attribution windows |
 | Conversions | Header-authenticated postbacks, atomic duplicate protection, staff approval/rejection, versioned notifications |
 | Reporting | SQL aggregation; separate currency totals; advertiser, affiliate, and publisher visibility |
-| Commissions | Append-only approval/reversal entries, account balances, recorded completed payouts, overpayment prevention |
+| Campaigns and invoices | Advertiser CPL/CPS campaigns, publisher applications, direct invoices, external payment reporting and publisher confirmation |
 | SaaS billing | Razorpay subscription checkout, signed/deduplicated webhooks, provider-state reconciliation, cancellation |
 | Platform owner | Workspace list/summary, suspension/reactivation, restricted platform-owner controls |
 | Operations | Audit log, delivery queue/retries, dependency readiness, bearer-protected Prometheus metrics |
@@ -49,7 +49,7 @@ See [advanced features](docs/advanced-features.md), [frontend API integration](d
 - Browser refresh/logout require a CSRF header and matching cookie, with allowed-origin checks. Production cookies are Secure and HttpOnly where appropriate. CORS accepts explicit origins and credentials.
 - Production requires PostgreSQL, Redis, HTTPS, verified email/SMTP, encryption, metrics authentication, Razorpay configuration, and explicit hosts. Public signup additionally requires Terms and Privacy URLs. The production example keeps signup disabled until those documents exist.
 - Request bodies are bounded by both the application and gateway. Rate limits are distributed and fail closed on Redis errors. Database connections have limits, health checks, UTC timestamps, statement timeouts, and pooling.
-- Monetary API values are decimal strings. Conversion duplicates cannot double-count a commission. Approval and payout recording lock commission accounts; reversals remain visible instead of deleting earned entries. Automated transfers use each network's encrypted RazorpayX credentials, reserve balances, and retry with stable provider idempotency keys.
+- Monetary API values are decimal strings. Conversion duplicates cannot double-count a commission. Approval and invoice creation lock commission records; reversals remain visible instead of deleting earned entries. Invoice reservations prevent double billing. Advertisers pay publishers externally; platform fund transfers are retired.
 - Outbound callbacks require explicitly allowed HTTPS hosts resolving only to public addresses. The delivery connection pins the validated IP and verifies TLS for the hostname. Redirects are not followed. Events have stable IDs and conversion versions for recipient deduplication/order handling.
 - Outbox processing uses leases and PostgreSQL `SKIP LOCKED`, bounded retries, failed-delivery visibility, and lease recovery. Delivery is **at least once**; recipients must deduplicate. Delivered payloads are cleared.
 
@@ -70,4 +70,6 @@ Measure staging traffic with `scripts/load_test.py --url <staging-tracking-url> 
 
 ## Scope and release validation
 
-This repository contains the backend only, including targeting, caps, rule-based fraud detection, verified tracking domains, automated payouts, reporting/export APIs, and subscription lifecycle reconciliation. Live DigitalOcean deployment, DNS/TLS issuance, SMTP delivery, Razorpay authorization/renewals and RazorpayX transfers, and backups/restore still require verification with your actual service configuration before admitting paying customers. Contract tests do not prove live provider integration or production capacity.
+This repository contains the backend only, including targeting, caps, rule-based fraud detection, advertiser landing/tracking domains, direct publisher invoices, reporting/export APIs, and subscription lifecycle reconciliation. Live DigitalOcean deployment, DNS/TLS issuance, SMTP delivery, Razorpay subscription authorization/renewals, and backups/restore still require verification with your actual service configuration before admitting paying customers. Contract tests do not prove live provider integration or production capacity.
+
+See [campaigns, invoices, advertiser domains and S2S integration](docs/campaigns-invoices-postbacks.md) for the current product workflow and ad-URL configuration limits.

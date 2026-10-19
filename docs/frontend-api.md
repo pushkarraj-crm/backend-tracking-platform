@@ -68,3 +68,7 @@ Workspace admins call `/billing/subscribe` with a configured plan. Redirect the 
 ## Response conventions
 
 List APIs accept `offset` and `limit` (maximum 100). Money is returned as decimal strings with currency. Dates are timezone-aware. Report `start`/`end` values must include a timezone and form a half-open interval. `400/422` indicate bad input, `401` invalid sessions, `403` denied access, `404` inaccessible/missing objects, `409` conflicts, `429` throttling, and `503` dependency failures. `X-Request-ID` correlates redacted logs. Validation responses omit submitted passwords and other raw input values.
+
+## Current self-service campaigns
+
+Use `/campaigns`, `/campaign-applications`, `/landing-pages`, `/publisher-invoices` and `/publisher-postback` as described in [the integration guide](campaigns-invoices-postbacks.md). Admin-created publishers can have no parent affiliate. Automated fund transfers and manual payout recording are retired. Advertisers pay publishers externally and publishers confirm receipt through invoices.

@@ -102,7 +102,7 @@ def create_user(body: UserCreate, db: DB, user: Actor):
             raise HTTPException(403, "Affiliates can create only their own publishers")
         parent_id = user.id
     if body.role == "publisher":
-        if not parent_id or owned(db, User, parent_id, user).role != "affiliate":
+        if parent_id and owned(db, User, parent_id, user).role != "affiliate":
             raise HTTPException(400, "Publisher requires an affiliate parent")
     elif parent_id:
         raise HTTPException(400, "Only publishers can have a parent")
@@ -322,6 +322,18 @@ def track(link_id: str, request: Request, db: DB, sub_id: str | None = Query(Non
         raise HTTPException(404, "Tracking link not found")
     offer = db.get(Offer, link.offer_id)
     affiliate = db.get(User, link.affiliate_id)
+    if offer.campaign_model in {"CPL", "CPS"} and affiliate.role == "publisher":
+        from .models import CampaignApplication
+
+        application = db.scalar(
+            select(CampaignApplication).where(
+                CampaignApplication.workspace_id == link.workspace_id,
+                CampaignApplication.offer_id == offer.id,
+                CampaignApplication.publisher_id == affiliate.id,
+            )
+        )
+        if not application or application.status != "approved":
+            raise HTTPException(403, "Publisher is not approved for this campaign")
     entitlement(db.get(Workspace, link.workspace_id))
     if affiliate.parent_user_id and not db.get(User, affiliate.parent_user_id).active:
         raise HTTPException(410, "Parent affiliate disabled")
@@ -330,7 +342,7 @@ def track(link_id: str, request: Request, db: DB, sub_id: str | None = Query(Non
     from .tracking import check_click, reserve
     from .domains import enforce_tracking_host
 
-    enforce_tracking_host(db, request, link.workspace_id)
+    enforce_tracking_host(db, request, link.workspace_id, offer.advertiser_id)
     metadata = check_click(db, offer, request)
     at = datetime.now(timezone.utc)
     reserve(db, offer, "clicks", at)
@@ -340,7 +352,17 @@ def track(link_id: str, request: Request, db: DB, sub_id: str | None = Query(Non
     db.add(click)
     db.commit()
     parts = urlsplit(offer.destination_url)
-    query = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k != "click_id"]
+    from .landing import AD_PARAMETERS
+
+    incoming = {
+        k: v for k, v in request.query_params.items() if k in AD_PARAMETERS and len(v) <= 256
+    }
+    query = [
+        (k, v)
+        for k, v in parse_qsl(parts.query, keep_blank_values=True)
+        if k != "click_id" and k not in incoming
+    ]
+    query.extend(incoming.items())
     query.append(("click_id", click.id))
     return RedirectResponse(urlunsplit(parts._replace(query=urlencode(query))), status_code=302)
 
@@ -352,6 +374,8 @@ def postback(
     offer = db.get(Offer, offer_id)
     if not offer or not secrets.compare_digest(offer.postback_key_hash, key_hash(x_postback_key)):
         raise HTTPException(401, "Invalid postback credentials")
+    if body.sale_currency and body.sale_currency != offer.currency:
+        raise HTTPException(422, "Sale currency does not match the campaign")
     click = db.scalar(
         select(Click)
         .join(TrackingLink, Click.link_id == TrackingLink.id)
@@ -373,6 +397,8 @@ def postback(
         )
     )
     if existing and existing.click_id == body.click_id:
+        if existing.sale_amount != body.sale_amount or existing.event_type != body.event_type:
+            raise HTTPException(409, "Retry payload does not match the original conversion")
         return JSONResponse(
             {"id": existing.id, "status": existing.status, "duplicate": True}, status_code=200
         )
@@ -388,14 +414,29 @@ def postback(
         datetime.now(timezone.utc) - utc(click.created_at)
     ).total_seconds() < rules.minimum_conversion_seconds:
         reject_fraud(db, offer, "conversion_too_fast", 80, click.ip_hash, click.id)
+    payout = offer.payout
+    revenue = offer.revenue
+    if offer.campaign_model == "CPS":
+        if body.event_type != "sale" or body.sale_amount is None:
+            raise HTTPException(422, "CPS postbacks require event_type=sale and sale_amount")
+        from decimal import ROUND_DOWN
+
+        payout = (body.sale_amount * offer.sale_percentage / Decimal("100")).quantize(
+            Decimal("0.0001"), rounding=ROUND_DOWN
+        )
+        revenue = payout
+    elif offer.campaign_model == "CPL" and (
+        body.event_type not in {None, "lead"} or body.sale_amount is not None
+    ):
+        raise HTTPException(422, "CPL campaigns accept lead events only")
     at = datetime.now(timezone.utc)
-    reserve(db, offer, "conversions", at)
+    reserve(db, offer, "conversions", at, revenue=revenue)
     conversion = Conversion(
         workspace_id=offer.workspace_id,
         offer_id=offer.id,
-        **body.model_dump(),
-        revenue=offer.revenue,
-        payout=offer.payout,
+        **body.model_dump(exclude={"sale_currency"}),
+        revenue=revenue,
+        payout=payout,
         currency=offer.currency,
         created_at=at,
     )
@@ -412,6 +453,8 @@ def postback(
             )
         )
         if existing and existing.click_id == body.click_id:
+            if existing.sale_amount != body.sale_amount or existing.event_type != body.event_type:
+                raise HTTPException(409, "Retry payload does not match the original conversion")
             return JSONResponse(
                 {"id": existing.id, "status": existing.status, "duplicate": True}, status_code=200
             )
@@ -422,7 +465,6 @@ def postback(
 @router.patch("/conversions/{conversion_id}")
 def update_conversion(conversion_id: str, body: StatusUpdate, db: DB, user: Actor):
     entitled(db, user)
-    staff_only(user)
     conversion = db.scalar(
         select(Conversion)
         .where(Conversion.id == conversion_id, Conversion.workspace_id == user.workspace_id)
@@ -430,8 +472,20 @@ def update_conversion(conversion_id: str, body: StatusUpdate, db: DB, user: Acto
     )
     if not conversion:
         raise HTTPException(404, "Resource not found")
+    if user.role == "advertiser":
+        offer = db.get(Offer, conversion.offer_id)
+        if offer.advertiser_id != user.id:
+            raise HTTPException(404, "Resource not found")
+    else:
+        staff_only(user)
     if conversion.status == body.status:
         return {"id": conversion.id, "status": conversion.status}
+    from .models import InvoiceReservation
+
+    if db.get(InvoiceReservation, conversion.id):
+        raise HTTPException(
+            409, "Invoiced conversions cannot be changed; resolve the invoice first"
+        )
     previous = conversion.status
     audit(db, user, "conversion.status", conversion.id, f"{previous} -> {body.status}")
     conversion.status = body.status
@@ -441,7 +495,7 @@ def update_conversion(conversion_id: str, body: StatusUpdate, db: DB, user: Acto
         .join(Click, Click.link_id == TrackingLink.id)
         .where(Click.id == conversion.click_id)
     )
-    # Lock the commission account shared with payout recording.
+    # Serialize ledger and invoice changes for the publisher commission account.
     db.scalar(select(User).where(User.id == link.affiliate_id).with_for_update())
     change = (
         conversion.payout
@@ -477,6 +531,11 @@ def update_conversion(conversion_id: str, body: StatusUpdate, db: DB, user: Acto
                 "endpoint_id": endpoint.id,
                 "event": {
                     "conversion_id": conversion.id,
+                    "campaign_id": conversion.offer_id,
+                    "event_type": conversion.event_type,
+                    "sale_amount": str(conversion.sale_amount)
+                    if conversion.sale_amount is not None
+                    else None,
                     "click_id": conversion.click_id,
                     "transaction_id": conversion.transaction_id,
                     "status": conversion.status,

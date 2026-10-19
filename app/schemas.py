@@ -113,6 +113,9 @@ class LinkCreate(StrictModel):
 class Postback(StrictModel):
     click_id: str = Field(pattern=r"^[a-f0-9]{32}$")
     transaction_id: str = Field(min_length=1, max_length=120)
+    event_type: Literal["lead", "sale"] | None = None
+    sale_amount: Decimal | None = Field(default=None, gt=0, max_digits=14, decimal_places=4)
+    sale_currency: str | None = Field(default=None, pattern=r"^[A-Z]{3}$")
 
 
 class StatusUpdate(StrictModel):
