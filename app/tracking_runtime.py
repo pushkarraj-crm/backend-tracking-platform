@@ -17,6 +17,8 @@ def resolve_link(db, link_id):
     entitlement(db.get(Workspace, link.workspace_id))
     if offer.advertiser_id and not db.get(User, offer.advertiser_id).active:
         raise HTTPException(410, "Advertiser disabled")
+    if publisher.role not in {"affiliate", "publisher"}:
+        raise HTTPException(410, "Account no longer has publisher access")
     if not offer.active or not publisher.active:
         raise HTTPException(410, "Tracking link disabled")
     if publisher.parent_user_id and not db.get(User, publisher.parent_user_id).active:

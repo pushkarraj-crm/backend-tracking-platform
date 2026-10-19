@@ -244,6 +244,22 @@ def test_real_company_databases(company_client, monkeypatch):  # noqa: F811 -- p
         assert summary.json()["users"] == 4
         listed = client.get("/platform/workspaces", headers=owner_headers)
         assert {w["company_slug"] for w in listed.json()} == {"media", "media-2"}
+        target_network = next(row["id"] for row in listed.json() if row["company_slug"] == "media")
+        accounts = client.get(f"/platform/networks/{target_network}/users", headers=owner_headers)
+        assert accounts.status_code == 200, accounts.text
+        member = next(row for row in accounts.json() if row["role"] == "publisher")
+        changed = client.patch(
+            f"/platform/networks/{target_network}/users/{member['id']}/access",
+            headers=owner_headers,
+            json={
+                "role": "staff",
+                "active": True,
+                "staff_permissions": ["reports:read"],
+                "reason": "Customer requested reporting staff access",
+            },
+        )
+        assert changed.status_code == 200, changed.text
+        assert changed.json()["role"] == "staff"
         suspended = client.patch(
             "/platform/workspaces/" + company.workspace_id,
             headers=owner_headers,
