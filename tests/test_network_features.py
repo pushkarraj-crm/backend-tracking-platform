@@ -753,3 +753,41 @@ def test_configured_cap_threshold_notifies_once_when_crossed(client):
 
     usage = client.get(f"/campaigns/{campaign['id']}/caps", headers=adv).json()[0]["recorded_usage"]
     assert Decimal(usage) == 5
+
+
+def test_postback_receipts_filter_by_campaign_and_keep_actor_scope(client):
+    admin, adv, pub, advertiser, publisher, campaign, link, click = campaign_flow(client)
+    assert postback(client, campaign, click).status_code == 201
+    other = client.post(
+        "/campaigns",
+        headers=adv,
+        json={
+            "name": "Other campaign",
+            "destination_url": "https://brand.example/other",
+            "revenue": "4",
+            "payout": "2",
+        },
+    ).json()
+    response = client.get("/postback-receipts", headers=adv, params={"offer_id": campaign["id"]})
+    assert response.status_code == 200, response.text
+    assert len(response.json()) == 1 and response.json()[0]["offer_id"] == campaign["id"]
+    assert (
+        client.get("/postback-receipts", headers=adv, params={"offer_id": other["id"]}).json() == []
+    )
+    assert (
+        client.get(
+            "/postback-receipts", headers=pub, params={"offer_id": campaign["id"]}
+        ).status_code
+        == 403
+    )
+    _, outsider = partner(client, admin, "advertiser", "other-advertiser")
+    assert (
+        client.get(
+            "/postback-receipts", headers=outsider, params={"offer_id": campaign["id"]}
+        ).status_code
+        == 404
+    )
+    assert (
+        client.get("/postback-receipts", headers=adv, params={"offer_id": "invalid"}).status_code
+        == 422
+    )

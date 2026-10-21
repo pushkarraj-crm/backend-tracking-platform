@@ -550,7 +550,11 @@ def cap_active(campaign_id: str, cap_id: str, body: ActiveUpdate, db: DB, user: 
 
 @router.get("/postback-receipts")
 def postback_receipts(
-    db: DB, user: Actor, offset: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=100)
+    db: DB,
+    user: Actor,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=100),
+    offer_id: str | None = Query(None, pattern=r"^[a-f0-9]{32}$"),
 ):
     query = (
         select(PostbackReceipt)
@@ -561,6 +565,9 @@ def postback_receipts(
         query = query.where(Offer.advertiser_id == user.id)
     elif user.role not in {"admin", "staff"}:
         raise HTTPException(403, "Advertiser or staff access required")
+    if offer_id:
+        manage_campaign(db, user, offer_id)
+        query = query.where(PostbackReceipt.offer_id == offer_id)
     return [
         serialize(r)
         for r in db.scalars(
