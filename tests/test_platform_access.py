@@ -99,3 +99,34 @@ def test_initial_owner_setup_does_not_revoke_owner_on_restart(client):
     assert client.get("/platform/summary", headers=fresh).status_code == 200
     with pytest.raises(ValueError):
         grant_owner("another@example.com", initial_only=True)
+
+
+def test_network_cannot_list_or_modify_platform_owner_in_original_workspace(client):
+    from scripts.grant_owner import grant_owner
+
+    admin, account = register(client, "Original owner workspace")
+    member, old_session = partner(client, admin, "advertiser", "isolated-owner")
+    grant_owner(member["email"])
+    root = sign_in(client, None, member["email"])
+    rows = client.get("/users", headers=admin, params={"limit": 1}).json()
+    assert len(rows) == 1 and rows[0]["id"] == account["id"]
+    assert member["email"] not in client.get("/users", headers=admin).text
+    path = f"/users/{member['id']}"
+    assert client.patch(path, headers=admin, json={"active": False}).status_code == 404
+    assert (
+        client.put(path + "/api-access", headers=admin, json={"enabled": True}).status_code == 404
+    )
+    assert (
+        client.put(path + "/permissions", headers=admin, json={"permissions": []}).status_code
+        == 404
+    )
+    assert client.get("/platform/summary", headers=root).status_code == 200
+    with SessionLocal() as db:
+        saved = db.get(User, member["id"])
+        assert saved.active and saved.role == "platform_admin" and not saved.api_enabled
+    # Normal partner management still works.
+    publisher, _ = partner(client, admin, "publisher", "normal-publisher")
+    assert (
+        client.patch(f"/users/{publisher['id']}", headers=admin, json={"active": False}).status_code
+        == 200
+    )

@@ -75,9 +75,12 @@ def visible_users(user):
 
 
 def owned(db, model, object_id, user):
-    result = db.scalar(
-        select(model).where(model.id == object_id, model.workspace_id == user.workspace_id)
-    )
+    query = select(model).where(model.id == object_id, model.workspace_id == user.workspace_id)
+    if model is User:
+        # Platform identities are not tenant-managed partners, even when an old
+        # owner activation retained the account's original workspace reference.
+        query = query.where(User.role != "platform_admin")
+    result = db.scalar(query)
     if not result:
         raise HTTPException(404, "Resource not found")
     return result
@@ -136,7 +139,9 @@ def list_users(
     entitled(db, user)
     if user.role not in {"admin", "staff", "affiliate"}:
         raise HTTPException(403, "User management access required")
-    query = select(User).where(User.workspace_id == user.workspace_id)
+    query = select(User).where(
+        User.workspace_id == user.workspace_id, User.role != "platform_admin"
+    )
     if user.role == "affiliate":
         query = query.where(User.parent_user_id == user.id)
     return [output_user(u) for u in db.scalars(query.order_by(User.id).offset(offset).limit(limit))]
