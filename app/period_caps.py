@@ -132,7 +132,9 @@ def reserve(
         )
         if current is None:
             raise HTTPException(429, "Campaign period cap reached")
-        threshold = cap.amount * Decimal("0.8")
+        from .campaign_policy import policy
+
+        threshold = cap.amount * Decimal(policy(offer).cap_alert_percent) / 100
         if delta > 0 and current >= threshold and current - delta < threshold:
             from .network_account import notify
 
@@ -145,6 +147,6 @@ def reserve(
                 targets,
                 "campaign.cap_threshold",
                 "Campaign cap threshold reached",
-                cap.name,
+                f"{cap.name}: {current} of {cap.amount} ({policy(offer).cap_alert_percent}% threshold).",
                 offer.id,
             )

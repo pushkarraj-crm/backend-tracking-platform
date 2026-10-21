@@ -104,6 +104,22 @@ def active_update(db, user, campaign_id, row_id, model, body):
     return serialize(row)
 
 
+def update_configuration(db, user, campaign_id, row_id, model, body):
+    entitled(db, user)
+    manage_campaign(db, user, campaign_id, lock=True)
+    row = owned(db, model, row_id, user)
+    if row.offer_id != campaign_id:
+        raise HTTPException(404, "Configuration not found")
+    values = body.model_dump()
+    if "active" not in body.model_fields_set:
+        values.pop("active", None)
+    for name, value in values.items():
+        setattr(row, name, str(value) if isinstance(value, HttpUrl) else value)
+    audit(db, user, model.__tablename__ + ".updated", row.id)
+    db.commit()
+    return serialize(row)
+
+
 @router.get("/campaigns/{campaign_id}/profile")
 def profile(campaign_id: str, db: DB, user: Actor):
     campaign = accessible(db, user, campaign_id)
@@ -244,6 +260,17 @@ def create_rate(campaign_id: str, body: RateBody, db: DB, user: Actor):
     )
 
 
+@router.put("/campaigns/{campaign_id}/commission-rules/{rule_id}")
+def edit_rate(campaign_id: str, rule_id: str, body: RateBody, db: DB, user: Actor):
+    manage_campaign(db, user, campaign_id)
+    if body.publisher_id:
+        publisher = owned(db, User, body.publisher_id, user)
+        if publisher.role != "publisher" or not publisher.active:
+            raise HTTPException(422, "Select an active publisher")
+    validate_event_reference(db, user, campaign_id, body.event_key)
+    return update_configuration(db, user, campaign_id, rule_id, CommissionRule, body)
+
+
 @router.get("/campaigns/{campaign_id}/commission-rules")
 def rates(campaign_id: str, db: DB, user: Actor):
     rows = scoped_rows(db, user, campaign_id, CommissionRule)
@@ -280,6 +307,11 @@ def create_asset(campaign_id: str, body: AssetBody, db: DB, user: Actor):
     return serialize(
         bounded_create(db, user, campaign_id, CampaignAsset, body.model_dump(mode="json"))
     )
+
+
+@router.put("/campaigns/{campaign_id}/creatives/{asset_id}")
+def edit_asset(campaign_id: str, asset_id: str, body: AssetBody, db: DB, user: Actor):
+    return update_configuration(db, user, campaign_id, asset_id, CampaignAsset, body)
 
 
 @router.get("/campaigns/{campaign_id}/creatives")
@@ -361,6 +393,17 @@ def create_destination(campaign_id: str, body: DestinationBody, db: DB, user: Ac
     )
 
 
+@router.put("/campaigns/{campaign_id}/destinations/{destination_id}")
+def edit_destination(
+    campaign_id: str, destination_id: str, body: DestinationBody, db: DB, user: Actor
+):
+    manage_campaign(db, user, campaign_id)
+    for publisher_id in body.publisher_ids:
+        if owned(db, User, publisher_id, user).role != "publisher":
+            raise HTTPException(422, "Select publishers in this network")
+    return update_configuration(db, user, campaign_id, destination_id, CampaignDestination, body)
+
+
 @router.get("/campaigns/{campaign_id}/destinations")
 def destinations(campaign_id: str, db: DB, user: Actor):
     rows = scoped_rows(db, user, campaign_id, CampaignDestination)
@@ -400,6 +443,11 @@ def create_traffic_rule(campaign_id: str, body: TrafficRuleBody, db: DB, user: A
     return serialize(
         bounded_create(db, user, campaign_id, TrafficRule, body.model_dump(mode="json"))
     )
+
+
+@router.put("/campaigns/{campaign_id}/traffic-rules/{rule_id}")
+def edit_traffic_rule(campaign_id: str, rule_id: str, body: TrafficRuleBody, db: DB, user: Actor):
+    return update_configuration(db, user, campaign_id, rule_id, TrafficRule, body)
 
 
 @router.get("/campaigns/{campaign_id}/traffic-rules")
@@ -444,11 +492,33 @@ def create_cap(campaign_id: str, body: CapBody, db: DB, user: Actor):
     return serialize(bounded_create(db, user, campaign_id, PeriodCap, body.model_dump(mode="json")))
 
 
+@router.put("/campaigns/{campaign_id}/caps/{cap_id}")
+def edit_cap(campaign_id: str, cap_id: str, body: CapBody, db: DB, user: Actor):
+    manage_campaign(db, user, campaign_id)
+    validate_event_reference(db, user, campaign_id, body.event_key)
+    if body.publisher_id and owned(db, User, body.publisher_id, user).role != "publisher":
+        raise HTTPException(422, "Select a publisher")
+    # Existing counters describe a particular metric, scope and period. Reusing
+    # them after changing those dimensions would enforce the wrong limit.
+    row = owned(db, PeriodCap, cap_id, user)
+    if row.offer_id != campaign_id:
+        raise HTTPException(404, "Configuration not found")
+    if any(
+        getattr(row, key) != getattr(body, key)
+        for key in ("publisher_id", "event_key", "metric", "period", "timezone")
+    ):
+        raise HTTPException(
+            409, "Create a new cap to change its metric, period, timezone or publisher/event scope"
+        )
+    return update_configuration(db, user, campaign_id, cap_id, PeriodCap, body)
+
+
 @router.get("/campaigns/{campaign_id}/caps")
 def caps(campaign_id: str, db: DB, user: Actor):
     from .period_caps import bucket, historical_usage
+    from .campaign_policy import policy
 
-    manage_campaign(db, user, campaign_id)
+    campaign = manage_campaign(db, user, campaign_id)
     rows = scoped_rows(db, user, campaign_id, PeriodCap)
     result = []
     for row in rows:
@@ -464,6 +534,7 @@ def caps(campaign_id: str, db: DB, user: Actor):
             {
                 **serialize(row),
                 "current_bucket": key,
+                "alert_percent": policy(campaign).cap_alert_percent,
                 "recorded_usage": str(
                     counter if counter is not None else historical_usage(db, row, start, end)
                 ),

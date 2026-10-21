@@ -86,6 +86,7 @@ def safe_url(value, templates=False):
 
 
 class CatalogSettings(StrictModel):
+    cap_alert_percent: int = Field(default=80, ge=1, le=100)
     visibility: Literal["open", "approval", "private"] = "approval"
     categories: list[str] = Field(default_factory=list, max_length=8)
     preview_url: HttpUrl | None = None

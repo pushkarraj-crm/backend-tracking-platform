@@ -1,12 +1,15 @@
 """Network-scoped advertiser campaigns, applications and publisher S2S settings."""
 
 import secrets
+from copy import deepcopy
 from typing import Literal
 from decimal import Decimal
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import Field, HttpUrl, model_validator
 from sqlalchemy import select, or_
 from sqlalchemy.exc import IntegrityError
+from .campaign_policy import CatalogSettings, ProfileBody
+from .tracking import Rules
 from .schemas import StrictModel, OfferCreate, ActiveUpdate
 from .security import DB, Actor, key_hash
 from .models import Offer, User, CampaignApplication, TrackingLink, WebhookEndpoint
@@ -19,6 +22,9 @@ router = APIRouter(tags=["Campaigns and applications"])
 
 
 class CampaignBody(OfferCreate):
+    settings: CatalogSettings = Field(default_factory=CatalogSettings)
+    tracking_rules: Rules = Field(default_factory=Rules)
+    active: bool = True
     campaign_model: Literal["CPL", "CPS"] = "CPL"
     sale_percentage: Decimal | None = Field(
         default=None, gt=0, le=100, max_digits=7, decimal_places=4
@@ -29,7 +35,16 @@ class CampaignBody(OfferCreate):
     def rate(self):
         from .campaign_policy import safe_url
 
+        self.name = self.name.strip()
+        if not self.name:
+            raise ValueError("Campaign name cannot be blank")
         safe_url(self.destination_url, templates=True)
+        ProfileBody(
+            name=self.name,
+            description=self.description,
+            destination_url=self.destination_url,
+            settings=self.settings,
+        )
         if self.destination_url.scheme != "https":
             raise ValueError("Campaign destinations must use HTTPS")
         if self.campaign_model == "CPS" and self.sale_percentage is None:
@@ -41,6 +56,17 @@ class CampaignBody(OfferCreate):
 
 class ApplicationBody(StrictModel):
     message: str = Field(default="", max_length=1000)
+
+
+class CloneBody(StrictModel):
+    name: str = Field(min_length=1, max_length=200)
+
+    @model_validator(mode="after")
+    def valid_name(self):
+        self.name = self.name.strip()
+        if not self.name:
+            raise ValueError("Campaign name cannot be blank")
+        return self
 
 
 class ReviewBody(StrictModel):
@@ -100,11 +126,15 @@ def create_campaign_record(body, db, user):
     key = secrets.token_urlsafe(32)
     campaign = Offer(
         workspace_id=user.workspace_id,
-        **body.model_dump(exclude={"destination_url", "advertiser_id"}),
+        **body.model_dump(
+            exclude={"destination_url", "advertiser_id", "settings", "tracking_rules", "active"}
+        ),
         destination_url=str(body.destination_url),
         advertiser_id=advertiser_id,
         postback_key_hash=key_hash(key),
-        active=True,
+        active=body.active,
+        catalog_settings=body.settings.model_dump(mode="json"),
+        tracking_rules=body.tracking_rules.model_dump(mode="json"),
     )
     db.add(campaign)
     db.flush()
@@ -154,6 +184,68 @@ def catalog(
         campaign_output(c, user)
         for c in db.scalars(query.order_by(Offer.id).offset(offset).limit(limit))
     ]
+
+
+@router.post("/campaigns/{campaign_id}/clone", status_code=201)
+def clone_campaign(campaign_id: str, body: CloneBody, db: DB, user: Actor):
+    """Copy campaign configuration into a paused campaign with fresh credentials."""
+    from .network_models import (
+        CampaignEvent,
+        CommissionRule,
+        CampaignAsset,
+        CampaignDestination,
+        TrafficRule,
+        PeriodCap,
+    )
+
+    entitled(db, user)
+    source = manage_campaign(db, user, campaign_id, lock=True)
+    copied, key = create_campaign_record(
+        CampaignBody(
+            name=body.name,
+            destination_url=source.destination_url,
+            revenue=source.revenue,
+            payout=source.payout,
+            currency=source.currency,
+            advertiser_id=source.advertiser_id,
+            attribution_hours=source.attribution_hours,
+            campaign_model=source.campaign_model,
+            sale_percentage=source.sale_percentage,
+            description=source.description,
+        ),
+        db,
+        user,
+    )
+    copied.active = False
+    copied.tracking_rules = deepcopy(source.tracking_rules)
+    copied.catalog_settings = deepcopy(source.catalog_settings)
+    # External identifiers must remain distinct from the original campaign.
+    copied.catalog_settings.pop("external_id", None)
+    # Only configuration tables are allowlisted. Never copy approvals, credentials,
+    # links, conversion records, financial history or accumulated cap counters.
+    for model in (
+        CampaignEvent,
+        CommissionRule,
+        CampaignAsset,
+        CampaignDestination,
+        TrafficRule,
+        PeriodCap,
+    ):
+        for row in db.scalars(
+            select(model).where(
+                model.workspace_id == user.workspace_id,
+                model.offer_id == source.id,
+            )
+        ):
+            values = {
+                column.key: deepcopy(getattr(row, column.key))
+                for column in model.__table__.columns
+                if column.key not in {"id", "workspace_id", "offer_id"}
+            }
+            db.add(model(workspace_id=user.workspace_id, offer_id=copied.id, **values))
+    audit(db, user, "campaign.cloned", copied.id, source.id)
+    db.commit()
+    return {**campaign_output(copied, user), "postback_key": key}
 
 
 @router.patch("/campaigns/{campaign_id}")

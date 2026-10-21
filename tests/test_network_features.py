@@ -35,6 +35,35 @@ def postback(client, campaign, click, transaction="order1", **extra):
     )
 
 
+def test_campaign_clone_is_paused_isolated_and_has_fresh_credentials(client):
+    from app.db import SessionLocal
+    from app.models import Offer
+    from app.security import key_hash
+
+    admin, adv, pub, advertiser, publisher, campaign, link, click = campaign_flow(client)
+    original_event = goal(client, adv, campaign)
+    route = f"/campaigns/{campaign['id']}/clone"
+    assert client.post(route, headers=pub, json={"name": "Forbidden"}).status_code == 403
+    _, other_adv = partner(client, admin, "advertiser", "other-advertiser")
+    assert client.post(route, headers=other_adv, json={"name": "Forbidden"}).status_code == 404
+    response = client.post(route, headers=adv, json={"name": "Campaign copy"})
+    assert response.status_code == 201, response.text
+    clone = response.json()
+    assert clone["id"] != campaign["id"] and clone["active"] is False
+    assert clone["postback_key"] != campaign["postback_key"]
+    events = client.get(f"/campaigns/{clone['id']}/events", headers=adv).json()
+    assert len(events) == 1 and events[0]["code"] == "qualified"
+    assert events[0]["id"] != original_event["id"]
+    assert client.post(f"/campaigns/{clone['id']}/link", headers=pub).status_code != 201
+    with SessionLocal() as db:
+        copied = db.get(Offer, clone["id"])
+        assert copied.postback_key_hash == key_hash(clone["postback_key"])
+        assert copied.advertiser_id == advertiser["id"]
+    # A different tenant cannot clone or discover the source.
+    other, _ = register(client, "Other network")
+    assert client.post(route, headers=other, json={"name": "Forbidden"}).status_code == 404
+
+
 def test_event_idempotency_and_repeat_sale_pricing(client):
     admin, adv, pub, advertiser, publisher, campaign, link, click = campaign_flow(client)
     goal(client, adv, campaign, auto_approve=True)
@@ -538,3 +567,189 @@ def test_hourly_cap_distinguishes_repeated_dst_hours():
     first = bucket(cap, datetime(2026, 11, 1, 5, 30, tzinfo=timezone.utc))
     second = bucket(cap, datetime(2026, 11, 1, 6, 30, tzinfo=timezone.utc))
     assert first[0] != second[0] and first[2] == second[1]
+
+
+def test_campaign_creation_saves_configuration_atomically(client):
+    admin, adv, pub, advertiser, publisher, campaign, link, click = campaign_flow(client)
+    body = {
+        "name": "Configured campaign",
+        "destination_url": "https://brand.example/?click={click_id}",
+        "campaign_model": "CPL",
+        "revenue": "10",
+        "payout": "5",
+        "active": False,
+        "settings": {
+            "visibility": "open",
+            "categories": ["Ecommerce"],
+            "preview_url": "https://brand.example/preview",
+            "internal_notes": "Manager only",
+        },
+        "tracking_rules": {"countries": ["IN", "US"]},
+    }
+    response = client.post("/campaigns", headers=adv, json=body)
+    assert response.status_code == 201, response.text
+    created = response.json()
+    assert created["active"] is False
+    from decimal import Decimal
+
+    assert Decimal(created["revenue"]) == 10 and Decimal(created["payout"]) == 5
+    assert created["settings"]["visibility"] == "open"
+    assert client.get(f"/offers/{created['id']}/rules", headers=adv).json()["countries"] == [
+        "IN",
+        "US",
+    ]
+    assert client.post(f"/campaigns/{created['id']}/apply", headers=pub, json={}).status_code == 409
+    assert (
+        client.patch(f"/campaigns/{created['id']}", headers=adv, json={"active": True}).status_code
+        == 200
+    )
+    assert (
+        client.post(f"/campaigns/{created['id']}/apply", headers=pub, json={}).json()["status"]
+        == "approved"
+    )
+    profile = client.get(f"/campaigns/{created['id']}/profile", headers=pub).json()
+    assert "internal_notes" not in profile["settings"]
+    assert profile["settings"]["categories"] == ["Ecommerce"]
+    before = len(client.get("/campaigns", headers=adv).json())
+    body["tracking_rules"] = {"countries": ["ZZ"]}
+    assert client.post("/campaigns", headers=adv, json=body).status_code == 422
+    assert len(client.get("/campaigns", headers=adv).json()) == before
+
+
+def test_campaign_configuration_can_be_edited_without_resetting_access_or_caps(client):
+    admin, adv, pub, advertiser, publisher, campaign, link, click = campaign_flow(client)
+    base = f"/campaigns/{campaign['id']}"
+    fixtures = [
+        (
+            "commission-rules",
+            {"name": "Rate", "payout": "2", "revenue": "4", "conditions": {"all": []}},
+            {
+                "name": "Updated rate",
+                "payout": "3",
+                "revenue": "6",
+                "conditions": {"all": [{"field": "source", "operator": "eq", "value": "search"}]},
+            },
+        ),
+        (
+            "destinations",
+            {"name": "Page", "url": "https://brand.example/one"},
+            {
+                "name": "Updated page",
+                "url": "https://brand.example/two",
+                "weight": 3,
+                "countries": ["US"],
+            },
+        ),
+        (
+            "creatives",
+            {"name": "Banner", "url": "https://brand.example/one.png"},
+            {"name": "Updated banner", "url": "https://brand.example/two.png"},
+        ),
+        (
+            "traffic-rules",
+            {"name": "Rule", "conditions": {"all": []}, "action": "allow"},
+            {
+                "name": "Updated rule",
+                "conditions": {"all": [{"field": "source", "operator": "eq", "value": "bad"}]},
+                "action": "reject",
+            },
+        ),
+        (
+            "caps",
+            {"name": "Clicks", "metric": "clicks", "amount": "10"},
+            {"name": "More clicks", "metric": "clicks", "amount": "20"},
+        ),
+    ]
+    for resource, original, updated in fixtures:
+        response = client.post(f"{base}/{resource}", headers=adv, json=original)
+        assert response.status_code == 201, response.text
+        row = response.json()
+        route = f"{base}/{resource}/{row['id']}"
+        assert client.patch(route, headers=adv, json={"active": False}).status_code == 200
+        assert client.put(route, headers=pub, json=updated).status_code == 403
+        response = client.put(route, headers=adv, json=updated)
+        assert response.status_code == 200, response.text
+        assert response.json()["name"] == updated["name"]
+        assert response.json()["active"] is False
+        other_campaign = client.post(
+            "/campaigns",
+            headers=adv,
+            json={
+                "name": "Other",
+                "destination_url": "https://brand.example",
+                "revenue": "2",
+                "payout": "1",
+            },
+        ).json()
+        assert (
+            client.put(
+                f"/campaigns/{other_campaign['id']}/{resource}/{row['id']}",
+                headers=adv,
+                json=updated,
+            ).status_code
+            == 404
+        )
+    caps = client.get(f"{base}/caps", headers=adv).json()
+    assert caps[0]["recorded_usage"] == "1" and caps[0]["alert_percent"] == 80
+    assert (
+        client.put(
+            f"{base}/caps/{caps[0]['id']}",
+            headers=adv,
+            json={"name": "Different metric", "metric": "conversions", "amount": "20"},
+        ).status_code
+        == 409
+    )
+    outsiders, _ = register(client, "Other tenant")
+    assert client.put(route, headers=outsiders, json=updated).status_code == 404
+
+
+def test_configured_cap_threshold_notifies_once_when_crossed(client):
+    admin, adv, pub, advertiser, publisher, campaign, link, click = campaign_flow(client)
+    profile_path = f"/campaigns/{campaign['id']}/profile"
+    profile = {
+        "name": campaign["name"],
+        "destination_url": campaign["destination_url"],
+        "settings": {"cap_alert_percent": 75},
+    }
+    assert client.put(profile_path, headers=adv, json=profile).status_code == 200
+    assert (
+        client.put(
+            profile_path, headers=adv, json={**profile, "settings": {"cap_alert_percent": 0}}
+        ).status_code
+        == 422
+    )
+    cap = client.post(
+        f"/campaigns/{campaign['id']}/caps",
+        headers=adv,
+        json={"name": "Four clicks", "metric": "clicks", "amount": "4"},
+    )
+    assert cap.status_code == 201, cap.text
+
+    def notices():
+        return [
+            n
+            for n in client.get("/notifications", headers=adv).json()
+            if n["kind"] == "campaign.cap_threshold"
+        ]
+
+    for expected in [0, 1, 1]:
+        assert client.get("/t/" + link["id"], follow_redirects=False).status_code == 302
+        assert len(notices()) == expected
+    assert client.get("/t/" + link["id"], follow_redirects=False).status_code == 429
+    assert len(notices()) == 1
+
+    # Raising the limit keeps prior usage; it must not grant a fresh empty bucket.
+    cap_id = cap.json()["id"]
+    assert (
+        client.put(
+            f"/campaigns/{campaign['id']}/caps/{cap_id}",
+            headers=adv,
+            json={"name": "Six clicks", "metric": "clicks", "amount": "6"},
+        ).status_code
+        == 200
+    )
+    assert client.get("/t/" + link["id"], follow_redirects=False).status_code == 302
+    from decimal import Decimal
+
+    usage = client.get(f"/campaigns/{campaign['id']}/caps", headers=adv).json()[0]["recorded_usage"]
+    assert Decimal(usage) == 5
