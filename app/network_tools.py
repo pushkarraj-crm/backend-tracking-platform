@@ -204,6 +204,166 @@ def bulk_conversion_status(body: BulkStatusBody, db: DB, user: Actor):
     return {"updated": len(rows), "status": body.status}
 
 
+class MisAction(StrictModel):
+    event_key: str = Field(default="initial", pattern=r"^[a-z][a-z0-9_]{0,63}$")
+    status: Literal["approved", "rejected"] | None = None
+
+
+class MisImportBody(StrictModel):
+    campaign_id: str = Field(pattern=r"^[a-f0-9]{32}$")
+    # shortcut: bounded by max_request_bytes (~600 MIS rows); split larger files or raise the limit.
+    csv_content: str = Field(min_length=1, max_length=60000)
+    reference_column: str = Field(min_length=1, max_length=100)
+    status_column: str = Field(min_length=1, max_length=100)
+    click_id_column: str | None = Field(default=None, min_length=1, max_length=100)
+    amount_column: str | None = Field(default=None, min_length=1, max_length=100)
+    statuses: dict[str, MisAction] = Field(min_length=1, max_length=50)
+    dry_run: bool = True
+
+
+@router.post("/tools/conversions/import")
+def import_conversions(body: MisImportBody, db: DB, user: Actor):
+    """Apply an advertiser MIS report: match rows by our click ID or the advertiser reference."""
+    from decimal import InvalidOperation
+    from sqlalchemy.exc import IntegrityError
+    from .conversion_engine import ingest, transition
+    from .schemas import Postback
+
+    employee_capability(user, "conversions:review")
+    offer = manage_campaign(db, user, body.campaign_id)
+    entitlement(db.get(Workspace, user.workspace_id))
+    stream = csv.DictReader(io.StringIO(body.csv_content.lstrip("﻿")))
+    fields = stream.fieldnames or []
+    needed = {body.reference_column, body.status_column} | {
+        c for c in (body.click_id_column, body.amount_column) if c
+    }
+    if len(fields) != len(set(fields)) or needed - set(fields):
+        raise HTTPException(422, "CSV must have unique headings including every mapped column")
+    rows = list(stream)
+    if not rows:
+        raise HTTPException(422, "CSV has no data rows")
+    counts = {"created": 0, "updated": 0, "unchanged": 0, "ignored": 0, "leads_approved": 0}
+
+    def approve_lead(reference, action):
+        # An approved later stage (e.g. disbursal) proves the lead; rejected leads stay rejected.
+        if action.event_key == "initial" or action.status != "approved":
+            return
+        lead = db.scalar(
+            select(Conversion)
+            .where(
+                Conversion.workspace_id == offer.workspace_id,
+                Conversion.offer_id == offer.id,
+                Conversion.transaction_id == reference,
+                Conversion.event_key == "initial",
+                Conversion.status == "pending",
+            )
+            .with_for_update()
+        )
+        if lead:
+            transition(db, user, lead, "approved")
+            counts["leads_approved"] += 1
+
+    unmatched, errors = [], []
+    for number, row in enumerate(rows, start=2):
+        reference = (row.get(body.reference_column) or "").strip()
+        try:
+            if None in row:
+                raise ValueError("CSV row has too many values")
+            if not reference:
+                raise ValueError("Reference is empty")
+            action = body.statuses.get((row.get(body.status_column) or "").strip())
+            if not action:
+                counts["ignored"] += 1
+                continue
+            existing = db.scalar(
+                select(Conversion)
+                .where(
+                    Conversion.workspace_id == offer.workspace_id,
+                    Conversion.offer_id == offer.id,
+                    Conversion.transaction_id == reference,
+                    Conversion.event_key == action.event_key,
+                )
+                .with_for_update()
+            )
+            if existing:
+                if action.status and existing.status != action.status:
+                    transition(db, user, existing, action.status)
+                    counts["updated"] += 1
+                else:
+                    counts["unchanged"] += 1
+                approve_lead(reference, action)
+                continue
+            click_id = (row.get(body.click_id_column) or "").strip() if body.click_id_column else ""
+            if not click_id:
+                # A later funnel stage inherits the click of an earlier conversion for this reference.
+                click_id = db.scalar(
+                    select(Conversion.click_id)
+                    .where(
+                        Conversion.workspace_id == offer.workspace_id,
+                        Conversion.offer_id == offer.id,
+                        Conversion.transaction_id == reference,
+                    )
+                    .order_by(Conversion.created_at)
+                    .limit(1)
+                )
+            if action.status == "rejected" or not click_id:
+                unmatched.append({"row": number, "reference": reference})
+                continue
+            amount = (row.get(body.amount_column) or "").strip() if body.amount_column else ""
+            conversion, _ = ingest(
+                db,
+                offer,
+                Postback(
+                    click_id=click_id,
+                    transaction_id=reference,
+                    event_key=action.event_key,
+                    event_type="sale" if amount else None,
+                    sale_amount=Decimal(amount.replace(",", "")) if amount else None,
+                ),
+                offline=True,
+            )
+            if action.status and conversion.status != action.status:
+                transition(db, user, conversion, action.status)
+            counts["created"] += 1
+            approve_lead(reference, action)
+        except IntegrityError:
+            db.rollback()
+            raise HTTPException(409, "Conversions changed during import; retry") from None
+        except HTTPException as error:
+            errors.append({"row": number, "reference": reference, "message": str(error.detail)})
+        except ValidationError as error:
+            message = "; ".join(e["msg"] for e in error.errors())
+            errors.append({"row": number, "reference": reference, "message": message})
+        except (ValueError, InvalidOperation) as error:
+            message = str(error) if isinstance(error, ValueError) else "Amount is not a number"
+            errors.append({"row": number, "reference": reference, "message": message})
+    result = {
+        "dry_run": body.dry_run,
+        "rows": len(rows),
+        **counts,
+        "unmatched": unmatched,
+        "errors": errors,
+        "can_import": not errors,
+    }
+    # Rows are applied in one transaction so the preview is exact and a failed import changes nothing.
+    if body.dry_run or errors:
+        db.rollback()
+        if errors and not body.dry_run:
+            raise HTTPException(
+                422, {"message": "Fix MIS preview errors before importing", **result}
+            )
+        return result
+    audit(
+        db,
+        user,
+        "conversions.imported",
+        offer.id,
+        f"{counts['created']} created, {counts['updated']} updated",
+    )
+    db.commit()
+    return result
+
+
 class PreviewBody(StrictModel):
     publisher_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
     source_parameters: dict[str, str] = Field(default_factory=dict, max_length=30)

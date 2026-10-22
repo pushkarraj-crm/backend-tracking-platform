@@ -51,6 +51,21 @@ It does not copy external IDs, publisher approvals, links, domain assignments,
 conversion/payment history, callback credentials or used cap counters. Review
 copied settings before activation. A separate audit entry references the source.
 
+## Current delivery: MIS conversion upload (CNV bulk CSV)
+
+`POST /tools/conversions/import` applies an advertiser status report (CSV) to one
+campaign. The body names the reference, status and optional click-ID and amount
+columns, and maps each status value to `{event_key, status?}`; unmapped values are
+ignored. A row updates the conversion with that reference and event, or creates it
+from the row's click ID or the click of an earlier conversion with the same reference.
+Rows without either are reported as unmatched. Approving a later stage (such as
+disbursal) also approves that reference's pending lead; a rejected lead stays rejected. Offline rows skip the attribution
+window and minimum-conversion-time checks. `dry_run` (default) previews exact
+results; an import with any row error changes nothing. Re-uploading a cumulative
+report is idempotent. Mappings are not saved yet, and uploads are bounded by the
+64 KB request limit (about 600 rows). The Frontend exposes it under Network tools →
+MIS upload.
+
 ## Delivery order
 
 1. Campaign setup/templates/cloning and conversion ingestion/attribution.

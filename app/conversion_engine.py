@@ -39,7 +39,7 @@ def existing_conversion(db, offer, body):
     )
 
 
-def ingest(db, offer, body):
+def ingest(db, offer, body, offline=False):
     from .tracking import Rules, reject_fraud, reserve
     from .period_caps import reserve as reserve_period_caps
 
@@ -63,14 +63,18 @@ def ingest(db, offer, body):
             raise HTTPException(409, "Retry payload does not match the original conversion")
         return existing, True
     entitlement(db.get(Workspace, offer.workspace_id))
-    if utc(click.created_at) < datetime.now(timezone.utc) - timedelta(
+    # Offline advertiser reports (MIS) arrive weeks after the click and are the
+    # advertiser's own confirmation, so window and speed checks apply to live postbacks only.
+    if not offline and utc(click.created_at) < datetime.now(timezone.utc) - timedelta(
         hours=offer.attribution_hours
     ):
         raise HTTPException(422, "Click attribution window expired")
     rules = Rules.model_validate(offer.tracking_rules)
     if (
-        datetime.now(timezone.utc) - utc(click.created_at)
-    ).total_seconds() < rules.minimum_conversion_seconds:
+        not offline
+        and (datetime.now(timezone.utc) - utc(click.created_at)).total_seconds()
+        < rules.minimum_conversion_seconds
+    ):
         reject_fraud(db, offer, "conversion_too_fast", 80, click.ip_hash, click.id)
     settings = policy(offer)
     event = None

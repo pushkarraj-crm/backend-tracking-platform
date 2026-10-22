@@ -791,3 +791,76 @@ def test_postback_receipts_filter_by_campaign_and_keep_actor_scope(client):
         client.get("/postback-receipts", headers=adv, params={"offer_id": "invalid"}).status_code
         == 422
     )
+
+
+def test_mis_import_matches_reference_or_click_and_is_idempotent(client):
+    from app.db import SessionLocal
+    from app.models import Conversion
+
+    admin, adv, pub, advertiser, publisher, campaign, link, click = campaign_flow(client)
+    goal(client, adv, campaign, code="disbursed", name="Loan disbursed", payout="500")
+    assert postback(client, campaign, click, "APP1").status_code == 201
+    second = client.get("/t/" + link["id"], follow_redirects=False)
+    click2 = parse_qs(urlsplit(second.headers["location"]).query)["click_id"][0]
+    content = (
+        "Application No,Status,Sub ID\n"
+        "APP1,Disbursed,\n"
+        "APP2,Rejected,\n"
+        "APP3,In progress,\n"
+        f"APP4,Approved,{click2}\n"
+    )
+    body = {
+        "campaign_id": campaign["id"],
+        "csv_content": content,
+        "reference_column": "Application No",
+        "status_column": "Status",
+        "click_id_column": "Sub ID",
+        "statuses": {
+            "Disbursed": {"event_key": "disbursed", "status": "approved"},
+            "Rejected": {"status": "rejected"},
+            "Approved": {"status": "approved"},
+        },
+    }
+    route = "/tools/conversions/import"
+    assert client.post(route, headers=pub, json=body).status_code in {403, 404}
+    _, other_adv = partner(client, admin, "advertiser", "other-advertiser")
+    assert client.post(route, headers=other_adv, json=body).status_code == 404
+
+    def stored():
+        with SessionLocal() as db:
+            return sorted(
+                (c.transaction_id, c.event_key, c.status)
+                for c in db.query(Conversion).filter_by(offer_id=campaign["id"])
+            )
+
+    before = stored()
+    preview = client.post(route, headers=adv, json=body)
+    assert preview.status_code == 200, preview.text
+    result = preview.json()
+    assert (result["created"], result["ignored"], result["leads_approved"]) == (2, 1, 1)
+    assert result["errors"] == []
+    assert result["unmatched"] == [{"row": 3, "reference": "APP2"}]
+    assert stored() == before
+    applied = client.post(route, headers=adv, json={**body, "dry_run": False})
+    assert applied.status_code == 200 and applied.json()["created"] == 2, applied.text
+    assert stored() == [
+        ("APP1", "disbursed", "approved"),
+        ("APP1", "initial", "approved"),
+        ("APP4", "initial", "approved"),
+    ]
+    again = client.post(route, headers=adv, json={**body, "dry_run": False}).json()
+    assert (again["created"], again["unchanged"]) == (0, 2)
+    rejected = {**body, "csv_content": "Application No,Status,Sub ID\nAPP1,Rejected,\n"}
+    assert (
+        client.post(route, headers=adv, json={**rejected, "dry_run": False}).json()["updated"] == 1
+    )
+    again = client.post(route, headers=adv, json={**body, "dry_run": False}).json()
+    assert (again["unchanged"], again["leads_approved"]) == (2, 0)
+    invalid = {**body, "csv_content": content + "APP5,Approved,not-a-click\n"}
+    response = client.post(route, headers=adv, json={**invalid, "dry_run": False})
+    assert response.status_code == 422 and response.json()["detail"]["errors"][0]["row"] == 6
+    assert stored() == [
+        ("APP1", "disbursed", "approved"),
+        ("APP1", "initial", "rejected"),
+        ("APP4", "initial", "approved"),
+    ]
