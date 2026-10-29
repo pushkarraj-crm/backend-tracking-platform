@@ -100,6 +100,13 @@ def me(user: Actor):
 def create_user(body: UserCreate, db: DB, user: Actor):
     if user.role not in {"admin", "affiliate"}:
         raise HTTPException(403, "Admin or affiliate access required")
+    if body.role == "advertiser" and db.get(Workspace, user.workspace_id).account_type == "brand":
+        raise HTTPException(403, "A brand account is its own advertiser")
+    if (
+        body.role in {"advertiser", "affiliate", "publisher"}
+        and db.get(Workspace, user.workspace_id).account_type == "influencer"
+    ):
+        raise HTTPException(403, "Influencer accounts add brands and links, not partner logins")
     parent_id = body.parent_user_id
     if user.role == "affiliate":
         if body.role != "publisher" or (parent_id and parent_id != user.id):
@@ -140,7 +147,10 @@ def list_users(
     if user.role not in {"admin", "staff", "affiliate"}:
         raise HTTPException(403, "User management access required")
     query = select(User).where(
-        User.workspace_id == user.workspace_id, User.role != "platform_admin"
+        User.workspace_id == user.workspace_id,
+        User.role != "platform_admin",
+        # A brand's built-in advertiser record is not a person to manage.
+        User.email.not_like("%.house.invalid"),
     )
     if user.role == "affiliate":
         query = query.where(User.parent_user_id == user.id)
@@ -290,7 +300,9 @@ def create_link(
     except IntegrityError:
         db.rollback()
         raise HTTPException(409, "Tracking link already exists")
-    return {"id": link.id, "url": f"{base}/t/{link.id}"}
+    url = link_url(db, base, link)
+    db.commit()
+    return {"id": link.id, "url": url}
 
 
 @router.get("/links")
@@ -310,15 +322,56 @@ def list_links(
     query = select(TrackingLink).where(TrackingLink.workspace_id == user.workspace_id)
     if user.role in {"affiliate", "publisher"}:
         query = query.where(TrackingLink.affiliate_id.in_(visible_users(user)))
-    return [
+    rows = [
         {
             "id": link.id,
             "offer_id": link.offer_id,
             "affiliate_id": link.affiliate_id,
-            "url": f"{base}/t/{link.id}",
+            "url": link_url(db, base, link),
         }
         for link in db.scalars(query.order_by(TrackingLink.id).offset(offset).limit(limit))
     ]
+    db.commit()  # keeps public numbers assigned while building the URLs
+    return rows
+
+
+def public_number(db, row):
+    """Short public ID for a campaign or partner, unique across accounts; assigned on first use."""
+    if row.public_number is None:
+        model = type(row)
+        # shortcut: random 6-digit IDs (900k per kind); widen the range before that fills up.
+        while True:
+            number = 100000 + secrets.randbelow(900000)
+            if not db.scalar(select(model.id).where(model.public_number == number)):
+                break
+        row.public_number = number
+        db.flush()
+    return row.public_number
+
+
+def link_url(db, base, link):
+    """Offer18-style tracking link: ?o=campaign&a=partner."""
+    offer, partner = db.get(Offer, link.offer_id), db.get(User, link.affiliate_id)
+    return f"{base}/c?o={public_number(db, offer)}&a={public_number(db, partner)}"
+
+
+@router.get("/c")
+def track_by_number(
+    request: Request,
+    db: DB,
+    o: int = Query(ge=1),
+    a: int = Query(ge=1),
+    sub_id: str | None = Query(None, max_length=100),
+):
+    link = db.scalar(
+        select(TrackingLink)
+        .join(Offer, Offer.id == TrackingLink.offer_id)
+        .join(User, User.id == TrackingLink.affiliate_id)
+        .where(Offer.public_number == o, User.public_number == a)
+    )
+    if not link:
+        raise HTTPException(404, "Tracking link not found")
+    return track(link.id, request, db, sub_id)
 
 
 @router.get("/t/{link_id}")
@@ -358,15 +411,27 @@ def postback(
     db: DB,
     x_postback_key: Annotated[str, Header(max_length=256)],
 ):
-    from .conversion_engine import ingest, existing_conversion, same_payload
+    offer = db.get(Offer, offer_id)
+    if not offer or not secrets.compare_digest(offer.postback_key_hash, key_hash(x_postback_key)):
+        raise HTTPException(401, "Invalid postback credentials")
+    return accept_postback(db, offer, body, request)
+
+
+def accept_postback(db, offer, body, request, status=None):
+    """Shared by per-campaign and global postbacks: policy, ingest, receipts, status updates."""
+    from .conversion_engine import (
+        ingest,
+        existing_conversion,
+        same_payload,
+        transition,
+        campaign_actor,
+        approve_lead,
+    )
     from .campaign_policy import policy
     from .network_models import PostbackReceipt
     import ipaddress
 
-    offer = db.get(Offer, offer_id)
-    if not offer or not secrets.compare_digest(offer.postback_key_hash, key_hash(x_postback_key)):
-        raise HTTPException(401, "Invalid postback credentials")
-    workspace_id = offer.workspace_id
+    offer_id, workspace_id = offer.id, offer.workspace_id
 
     def receipt(result, status):
         db.add(
@@ -401,6 +466,12 @@ def postback(
             if not conversion or not same_payload(conversion, body):
                 raise HTTPException(409, "Transaction or click already converted") from None
             duplicate = True
+        if status and conversion.status != status:
+            # Advertisers may report a later status for the same transaction.
+            actor = campaign_actor(db, offer)
+            transition(db, actor, conversion, status)
+            if status == "approved":
+                approve_lead(db, actor, offer, conversion.transaction_id, conversion.event_key)
         result = {"id": conversion.id, "status": conversion.status, "duplicate": duplicate}
         receipt("duplicate" if duplicate else "accepted", 200 if duplicate else 201)
         db.commit()
@@ -418,6 +489,126 @@ def postback(
         db.commit()
         raise
     return JSONResponse(result, status_code=200) if duplicate else result
+
+
+GLOBAL_EVENTS = {"", "initial", "lead", "sale", "conversion"}
+
+
+@router.api_route("/pb/{token}", methods=["GET", "POST"], status_code=201)
+async def global_postback(token: str, request: Request, db: DB):
+    """One postback URL per account; the click identifies the campaign."""
+    from starlette.concurrency import run_in_threadpool
+
+    values = dict(request.query_params)
+    if request.method == "POST":
+        try:
+            data = (
+                await request.json()
+                if "json" in request.headers.get("content-type", "")
+                else dict(await request.form())
+            )
+        except ValueError:
+            raise HTTPException(422, "Postback body must be JSON or form data") from None
+        if not isinstance(data, dict):
+            raise HTTPException(422, "Postback body must be an object")
+        values.update(data)
+    values = {str(k).lower(): str(v).strip() for k, v in values.items() if v is not None}
+    return await run_in_threadpool(receive_global_postback, db, token, values, request)
+
+
+def receive_global_postback(db, token, values, request):
+    from pydantic import ValidationError
+    from .network_models import CampaignEvent
+
+    workspace = (
+        db.scalar(select(Workspace).where(Workspace.postback_token_hash == key_hash(token)))
+        if 16 <= len(token) <= 128
+        else None
+    )
+    if not workspace:
+        raise HTTPException(401, "Invalid postback credentials")
+    click = db.scalar(
+        select(Click).where(
+            Click.id == values.get("click_id", ""), Click.workspace_id == workspace.id
+        )
+    )
+    if not click:
+        raise HTTPException(404, "Click not found")
+    offer = db.get(Offer, db.get(TrackingLink, click.link_id).offer_id)
+    event = values.get("event", "").lower()
+    event_key = "initial" if event in GLOBAL_EVENTS else event
+    model = offer.campaign_model
+    if event_key != "initial":
+        model = db.scalar(
+            select(CampaignEvent.model).where(
+                CampaignEvent.workspace_id == offer.workspace_id,
+                CampaignEvent.offer_id == offer.id,
+                CampaignEvent.code == event_key,
+            )
+        )
+    # Other platforms often send an amount on every event; it only prices CPS events.
+    amount = values.get("amount") if model == "CPS" else None
+    status = values.get("status", "").lower() or None
+    if status not in {None, "approved", "rejected", "pending"}:
+        raise HTTPException(422, "status must be approved, rejected or pending")
+    try:
+        body = Postback(
+            click_id=click.id,
+            transaction_id=values.get("txn_id") or click.id,
+            event_key=event_key,
+            event_type="sale" if amount else ("lead" if event == "lead" else None),
+            sale_amount=amount or None,
+            sale_currency=(values.get("currency", "").upper() or None) if amount else None,
+            advertiser_parameters={
+                k: values[k]
+                for k in (*[f"adv_sub{i}" for i in range(1, 6)], "coupon")
+                if values.get(k)
+            },
+        )
+    except ValidationError as error:
+        raise HTTPException(422, "; ".join(e["msg"] for e in error.errors())) from None
+    return accept_postback(db, offer, body, request, status)
+
+
+def account_postback_url(db, workspace):
+    """The account's global postback URL, creating its secret on first use."""
+    from .services import decrypt
+    from .tenancy import company_context
+
+    if workspace.postback_token:
+        token = decrypt(workspace.postback_token)
+    else:
+        token = rotate_postback_token(db, workspace)
+    company = company_context.get()
+    prefix = "/c/" + company.slug if company else ""
+    return get_settings().public_base_url.rstrip("/") + prefix + "/pb/" + token
+
+
+def rotate_postback_token(db, workspace):
+    from .services import encrypt
+
+    token = secrets.token_urlsafe(24)
+    workspace.postback_token_hash = key_hash(token)
+    workspace.postback_token = encrypt(token)
+    db.commit()
+    return token
+
+
+@router.get("/postback-settings")
+def postback_settings(db: DB, user: Actor):
+    staff_only(user)
+    return {"url": account_postback_url(db, db.get(Workspace, user.workspace_id))}
+
+
+@router.post("/postback-settings/rotate")
+def rotate_postback(db: DB, user: Actor):
+    if user.role != "admin":
+        raise HTTPException(403, "Network admin required")
+    workspace = db.get(Workspace, user.workspace_id)
+    rotate_postback_token(db, workspace)
+    audit(db, user, "postback.rotated", workspace.id, "global postback secret")
+    db.commit()
+    return {"url": account_postback_url(db, workspace)}
 
 
 @router.patch("/conversions/{conversion_id}")

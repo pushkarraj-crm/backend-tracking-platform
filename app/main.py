@@ -31,6 +31,8 @@ from .web_tracking import router as web_tracking_router
 from .callbacks import router as callbacks_router
 from .platform_access import router as platform_access_router
 from .network_tools import router as network_tools_router
+from .influencer import router as influencer_router
+from .sources import router as sources_router
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 
@@ -88,6 +90,8 @@ app.include_router(web_tracking_router)
 app.include_router(callbacks_router)
 app.include_router(platform_access_router)
 app.include_router(network_tools_router)
+app.include_router(influencer_router)
+app.include_router(sources_router)
 
 
 @app.exception_handler(RequestValidationError)

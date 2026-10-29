@@ -864,3 +864,378 @@ def test_mis_import_matches_reference_or_click_and_is_idempotent(client):
         ("APP1", "initial", "rejected"),
         ("APP4", "initial", "approved"),
     ]
+
+
+def test_global_postback_resolves_campaign_from_click_and_updates_status(client):
+    from app.db import SessionLocal
+    from app.models import Conversion
+
+    admin, adv, pub, advertiser, publisher, campaign, link, click = campaign_flow(client)
+    goal(client, adv, campaign, code="disbursed", name="Loan disbursed", payout="500")
+    assert client.get("/postback-settings", headers=pub).status_code == 403
+    url = client.get("/postback-settings", headers=admin).json()["url"]
+    assert client.get("/postback-settings", headers=admin).json()["url"] == url
+    path = "/pb/" + url.rsplit("/pb/", 1)[1]
+
+    response = client.get(path, params={"click_id": click, "txn_id": "APP9", "event": "lead"})
+    assert response.status_code == 201, response.text
+    assert response.json()["status"] == "pending"
+    again = client.get(path, params={"CLICK_ID": click, "TXN_ID": "APP9", "event": "lead"})
+    assert again.status_code == 200 and again.json()["duplicate"] is True
+    # A CPL event ignores the amount other platforms send with every postback.
+    stage = client.post(
+        path,
+        json={
+            "click_id": click,
+            "txn_id": "APP9",
+            "event": "disbursed",
+            "amount": "250000",
+            "currency": "XYZ",
+            "status": "approved",
+            "coupon": "PRIYA10",
+        },
+    )
+    assert stage.status_code == 201 and stage.json()["status"] == "approved", stage.text
+    with SessionLocal() as db:
+        rows = {
+            c.event_key: (c.status, c.advertiser_parameters)
+            for c in db.query(Conversion).filter_by(offer_id=campaign["id"])
+        }
+    assert rows["initial"][0] == "approved"
+    assert rows["disbursed"] == ("approved", {"coupon": "PRIYA10"})
+
+    assert client.get(path, params={"click_id": "f" * 32}).status_code == 404
+    assert client.get(path, params={"click_id": click, "status": "paid"}).status_code == 422
+    assert client.get("/pb/" + "x" * 32, params={"click_id": click}).status_code == 401
+    assert client.post("/postback-settings/rotate", headers=adv).status_code == 403
+    rotated = client.post("/postback-settings/rotate", headers=admin).json()["url"]
+    assert rotated != url
+    assert client.get(path, params={"click_id": click, "txn_id": "APP9"}).status_code == 401
+
+
+def test_link_forwards_personal_parameters_without_storing_them(client):
+    from app.db import SessionLocal
+    from app.models import Click
+
+    admin, adv, pub, advertiser, publisher, campaign, link, click = campaign_flow(client)
+    response = client.get(
+        "/t/" + link["id"],
+        params={
+            "deviceid": "dev-1",
+            "googleaid": "gaid-1",
+            "t_email": "a@b.example",
+            "t_sub3": "x",
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 302, response.text
+    params = parse_qs(urlsplit(response.headers["location"]).query)
+    assert params["t_email"] == ["a@b.example"] and params["deviceid"] == ["dev-1"]
+    assert params["t_sub3"] == ["x"]
+    with SessionLocal() as db:
+        stored = db.get(Click, params["click_id"][0]).attributes
+    assert stored["deviceid"] == "dev-1" and stored["googleaid"] == "gaid-1"
+    assert not any(key.startswith("t_") for key in stored)
+
+
+def test_brand_account_is_its_own_advertiser(client):
+    from test_api import signup_body
+
+    response = client.post(
+        "/auth/register",
+        json={**signup_body("Brand Co"), "business_type": "brand_direct_advertiser"},
+    )
+    assert response.status_code == 201, response.text
+    brand = {"Authorization": "Bearer " + response.json()["access_token"]}
+    assert client.get("/workspace", headers=brand).json()["account_type"] == "brand"
+    body = {
+        "name": "Diwali sale",
+        "destination_url": "https://brand.example/sale",
+        "revenue": "80",
+        "payout": "80",
+        "campaign_model": "CPL",
+    }
+    first = client.post("/campaigns", headers=brand, json=body)
+    second = client.post("/campaigns", headers=brand, json={**body, "name": "Second"})
+    assert first.status_code == 201 and second.status_code == 201, first.text
+    assert first.json()["advertiser_id"] == second.json()["advertiser_id"]
+    advertiser = {
+        "email": "adv@brand.example",
+        "password": "affiliate-password-123",
+        "role": "advertiser",
+    }
+    assert client.post("/users", headers=brand, json=advertiser).status_code == 403
+    agency = {**advertiser, "email": "agency@brand.example", "role": "affiliate"}
+    assert client.post("/users", headers=brand, json=agency).status_code == 201
+    roles = sorted(u["role"] for u in client.get("/users", headers=brand).json())
+    assert roles == ["admin", "affiliate"]
+
+
+def test_targets_track_progress_without_blocking_and_include_agency_publishers(client):
+    from datetime import date, timedelta
+    from app.db import SessionLocal
+    from app.models import User
+
+    admin, adv, pub, advertiser, publisher, campaign, link, click = campaign_flow(client)
+    agency, _ = partner(client, admin, "affiliate", "agency")
+    with SessionLocal() as db:
+        db.get(User, publisher["id"]).parent_user_id = agency["id"]
+        db.commit()
+    today = date.today()
+    window = {
+        "starts_on": str(today - timedelta(days=4)),
+        "ends_on": str(today + timedelta(days=5)),
+    }
+    route = f"/campaigns/{campaign['id']}/targets"
+    overall = client.post(route, headers=adv, json={"name": "Overall", "amount": 10, **window})
+    split = client.post(
+        route,
+        headers=adv,
+        json={"name": "Agency A", "amount": 1, "partner_id": agency["id"], **window},
+    )
+    assert overall.status_code == 201 and split.status_code == 201, split.text
+    assert client.post(
+        route, headers=pub, json={"name": "x", "amount": 1, **window}
+    ).status_code in {403, 404}
+    bad = {**window, "ends_on": str(today - timedelta(days=9))}
+    assert (
+        client.post(route, headers=adv, json={"name": "Bad", "amount": 1, **bad}).status_code == 422
+    )
+
+    assert postback(client, campaign, click, "T1").status_code == 201
+    second = client.get("/t/" + link["id"], follow_redirects=False)
+    click2 = parse_qs(urlsplit(second.headers["location"]).query)["click_id"][0]
+    # Targets never block: the agency's second sale goes past its target of 1.
+    assert postback(client, campaign, click2, "T2").status_code == 201
+    rows = {r["name"]: r for r in client.get(route, headers=adv).json()}
+    assert rows["Overall"]["achieved"] == 2 and rows["Overall"]["expected_by_today"] == 5
+    assert rows["Overall"]["pace"] == "behind" and rows["Overall"]["commission"] == "8.5000"
+    assert rows["Agency A"]["achieved"] == 2 and rows["Agency A"]["percent"] == 200
+    assert rows["Agency A"]["pace"] == "ahead"
+    summary = client.get("/targets", headers=admin).json()
+    assert {r["campaign_name"] for r in summary} == {campaign["name"]} and len(summary) == 2
+
+
+def test_offer18_style_links_use_stable_public_numbers(client):
+    import re
+
+    admin, adv, pub, advertiser, publisher, campaign, link, click = campaign_flow(client)
+    url = link["url"]
+    match = re.search(r"/c\?o=(\d{6})&a=(\d{6})$", url)
+    assert match, url
+    again = client.post(f"/campaigns/{campaign['id']}/link", headers=pub).json()["url"]
+    listed = [r["url"] for r in client.get("/links", headers=pub).json()]
+    assert again == url and listed == [url]
+    response = client.get(
+        "/c", params={"o": match[1], "a": match[2], "aff_click_id": "net-9"}, follow_redirects=False
+    )
+    assert response.status_code == 302, response.text
+    assert parse_qs(urlsplit(response.headers["location"]).query)["aff_click_id"] == ["net-9"]
+    assert client.get("/c", params={"o": match[1], "a": 1}).status_code == 404
+    assert client.get("/t/" + link["id"], follow_redirects=False).status_code == 302
+
+
+def test_influencer_tracks_brand_deals_by_post_platform_and_manual_totals(client):
+    from datetime import date
+    from test_api import signup_body
+
+    response = client.post(
+        "/auth/register",
+        json={**signup_body("Priya Creates"), "business_type": "influencer_creator"},
+    )
+    assert response.status_code == 201, response.text
+    me = {"Authorization": "Bearer " + response.json()["access_token"]}
+    assert client.get("/workspace", headers=me).json()["account_type"] == "influencer"
+    brand = client.post("/brands", headers=me, json={"name": "boAt"})
+    assert brand.status_code == 201, brand.text
+    assert [b["name"] for b in client.get("/brands", headers=me).json()] == ["boAt"]
+    deal = client.post(
+        "/campaigns",
+        headers=me,
+        json={
+            "name": "boAt Airdopes launch",
+            "destination_url": "https://boat.example/airdopes",
+            "revenue": "60",
+            "payout": "60",
+            "campaign_model": "CPL",
+            "advertiser_id": brand.json()["id"],
+            "currency": "INR",
+        },
+    )
+    assert deal.status_code == 201, deal.text
+    story = client.post(
+        "/placements",
+        headers=me,
+        json={
+            "campaign_id": deal.json()["id"],
+            "name": "Insta story 28 Oct",
+            "platform": "instagram",
+        },
+    ).json()
+    review = client.post(
+        "/placements",
+        headers=me,
+        json={"campaign_id": deal.json()["id"], "name": "YouTube review", "platform": "youtube"},
+    ).json()
+    assert story["url"] != review["url"] and "&sub_id=instagram-insta-story-28-oct-" in story["url"]
+
+    def click(url):
+        parts = urlsplit(url)
+        r = client.get(parts.path + "?" + parts.query, follow_redirects=False)
+        assert r.status_code == 302, r.text
+        return parse_qs(urlsplit(r.headers["location"]).query)["click_id"][0]
+
+    first, _, _ = click(story["url"]), click(story["url"]), click(review["url"])
+    pb = client.get("/postback-settings", headers=me).json()["url"]
+    pb_path = "/pb/" + pb.rsplit("/pb/", 1)[1]
+    assert client.get(pb_path, params={"click_id": first, "txn_id": "ORD1"}).status_code == 201
+    manual = client.post(
+        "/manual-results",
+        headers=me,
+        json={
+            "campaign_id": deal.json()["id"],
+            "period_start": str(date.today()),
+            "period_end": str(date.today()),
+            "sales": 3,
+            "earnings": "180",
+            "note": "Brand email, coupon PRIYA10",
+        },
+    )
+    assert manual.status_code == 201, manual.text
+    summary = client.get("/influencer/summary", headers=me).json()
+    assert summary["deals"][0]["brand"] == "boAt"
+    assert (summary["deals"][0]["clicks"], summary["deals"][0]["sales"]) == (3, 4)
+    assert summary["deals"][0]["earnings"] == "240.0000"
+    spots = {p["name"]: p for p in summary["placements"]}
+    assert (spots["Insta story 28 Oct"]["clicks"], spots["Insta story 28 Oct"]["sales"]) == (2, 1)
+    assert spots["Insta story 28 Oct"]["conversion_rate"] == 50
+    assert (spots["YouTube review"]["clicks"], spots["YouTube review"]["sales"]) == (1, 0)
+    assert {p["platform"]: p["clicks"] for p in summary["platforms"]} == {
+        "instagram": 2,
+        "youtube": 1,
+    }
+    partner = {
+        "email": "pub@creator.example",
+        "password": "affiliate-password-123",
+        "role": "publisher",
+    }
+    assert client.post("/users", headers=me, json=partner).status_code == 403
+    admin, *_ = campaign_flow(client)
+    assert client.get("/brands", headers=admin).status_code == 404
+
+
+def test_campaign_created_with_funnel_stages_in_one_step(client):
+    admin, adv, pub, advertiser, publisher, campaign, link, click = campaign_flow(client)
+    body = {
+        "name": "Personal loan funnel",
+        "destination_url": "https://lender.example/apply?sub={click_id}",
+        "revenue": "60",
+        "payout": "50",
+        "campaign_model": "CPL",
+        "currency": "INR",
+        "attribution_hours": 1440,
+        "settings": {"visibility": "approval", "categories": ["Loans"], "external_id": "LN-77"},
+        "tracking_rules": {"countries": ["IN"], "daily_conversions": 500},
+        "events": [
+            {"code": "approved", "name": "Loan approved", "payout": "200", "revenue": "250"},
+            {"code": "disbursed", "name": "Loan disbursed", "payout": "500", "revenue": "650"},
+        ],
+    }
+    created = client.post("/campaigns", headers=adv, json=body)
+    assert created.status_code == 201, created.text
+    events = client.get(f"/campaigns/{created.json()['id']}/events", headers=adv).json()
+    assert sorted((e["code"], e["payout"]) for e in events) == [
+        ("approved", "200.0000"),
+        ("disbursed", "500.0000"),
+    ]
+    before = len(client.get("/campaigns", headers=adv).json())
+    duplicate = {**body, "events": [body["events"][0], body["events"][0]]}
+    assert client.post("/campaigns", headers=adv, json=duplicate).status_code == 422
+    initial = {**body, "events": [{"code": "initial", "name": "Lead"}]}
+    assert client.post("/campaigns", headers=adv, json=initial).status_code == 422
+    assert len(client.get("/campaigns", headers=adv).json()) == before
+
+
+def test_blocked_sources_reject_clicks_and_later_conversions_and_partners_see_why(client):
+    admin, adv, pub, advertiser, publisher, campaign, link, click = campaign_flow(client)
+    t = "/t/" + link["id"]
+    blocks = [{"preset": "cashback_sites"}, {"preset": "meta_ads"}]
+    for body in blocks:
+        assert client.post("/blocked-sources", headers=admin, json=body).status_code == 201
+    campaign_only = {"preset": "custom_source", "value": "Telegram", "campaign_id": campaign["id"]}
+    assert client.post("/blocked-sources", headers=admin, json=campaign_only).status_code == 201
+    bad = [
+        {"preset": "custom_domain", "value": "not a domain"},
+        {"preset": "google_ads", "value": "x"},
+        {"preset": "custom_source", "value": " "},
+    ]
+    for body in bad:
+        assert client.post("/blocked-sources", headers=admin, json=body).status_code == 422
+    assert client.post("/blocked-sources", headers=pub, json=blocks[0]).status_code == 403
+
+    cashback = client.get(
+        t, headers={"Referer": "https://www.cashkaro.com/deals?x=1"}, follow_redirects=False
+    )
+    assert cashback.status_code == 403
+    assert (
+        client.get(t, params={"utm_source": "telegram"}, follow_redirects=False).status_code == 403
+    )
+    normal = client.get(t, headers={"Referer": "https://www.google.com/"}, follow_redirects=False)
+    assert normal.status_code == 302
+    assert client.get(t, params={"fbclid": "abc"}, follow_redirects=False).status_code == 403
+    seen = client.get("/fraud/partner-events", headers=pub).json()
+    assert {e["reason"] for e in seen} == {
+        "Blocked source: Cashback and coupon sites",
+        "Blocked source: source / utm_source value",
+        "Blocked source: Facebook / Instagram ads (fbclid)",
+    }
+    assert client.get("/fraud/partner-events", headers=adv).status_code == 403
+    # A click recorded before a block was added still converts, but earns nothing.
+    google = client.get(t, params={"gclid": "g-1"}, follow_redirects=False)
+    google_click = parse_qs(urlsplit(google.headers["location"]).query)["click_id"][0]
+    assert (
+        client.post("/blocked-sources", headers=admin, json={"preset": "google_ads"}).status_code
+        == 201
+    )
+    late = postback(client, campaign, google_click, "LATE1")
+    assert late.status_code == 201 and late.json()["status"] == "rejected", late.text
+    # Clicks recorded before referrer capture have no referrer field, so "no referrer"
+    # must not retro-block them.
+    from app.db import SessionLocal
+    from app.models import Click
+
+    plain = parse_qs(urlsplit(normal.headers["location"]).query)["click_id"][0]
+    with SessionLocal() as db:
+        old = db.get(Click, plain)
+        old.attributes = {k: v for k, v in old.attributes.items() if k != "referrer"}
+        db.commit()
+    added = client.post("/blocked-sources", headers=admin, json={"preset": "no_referrer"})
+    assert added.status_code == 201
+    assert postback(client, campaign, plain, "OLD1").json()["status"] == "pending"
+    listed = client.get("/blocked-sources", headers=admin).json()
+    assert len(listed["blocks"]) == 5 and "cashkaro.com" in listed["cashback_domains"]
+    block_id = listed["blocks"][0]["id"]
+    assert (
+        client.patch(f"/blocked-sources/{block_id}", headers=admin, json={"active": False}).json()[
+            "active"
+        ]
+        is False
+    )
+
+
+def test_unique_click_window_reuses_the_visitors_earlier_click(client):
+    admin, adv, pub, advertiser, publisher, campaign, link, click = campaign_flow(client)
+    rules = client.get(f"/offers/{campaign['id']}/rules", headers=adv).json()
+    saved = client.put(
+        f"/offers/{campaign['id']}/rules", headers=adv, json={**rules, "unique_click_hours": 24}
+    )
+    assert saved.status_code == 200, saved.text
+
+    def click_id():
+        r = client.get("/t/" + link["id"], follow_redirects=False)
+        assert r.status_code == 302, r.text
+        return parse_qs(urlsplit(r.headers["location"]).query)["click_id"][0]
+
+    # The fixture's click came from this same visitor within the window, so it is reused.
+    assert click_id() == click and click_id() == click
+    assert len(client.get("/reports/clicks", headers=pub).json()) == 1

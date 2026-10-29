@@ -49,6 +49,13 @@ class Workspace(Base):
         index=True,
     )
     business_type: Mapped[str | None] = mapped_column(String(40))
+    # brand | network | influencer: selects navigation, wording and features.
+    account_type: Mapped[str] = mapped_column(
+        String(20), default="network", server_default="network"
+    )
+    # Global postback secret: hash for lookup, encrypted copy so admins can view the URL.
+    postback_token_hash: Mapped[str | None] = mapped_column(String(64), unique=True)
+    postback_token: Mapped[str | None] = mapped_column(Text)
     usage_types: Mapped[list[str]] = mapped_column(JSON, default=list, server_default="[]")
     country: Mapped[str | None] = mapped_column(String(2))
     mobile: Mapped[str | None] = mapped_column(String(20))
@@ -70,6 +77,8 @@ class User(Base):
         ),
     )
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=identifier)
+    # Short public partner ID used in tracking links (&a=).
+    public_number: Mapped[int | None] = mapped_column(Integer, unique=True)
     workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
     email: Mapped[str] = mapped_column(String(254))
     password_hash: Mapped[str] = mapped_column(String(256))
@@ -95,6 +104,8 @@ class Offer(Base):
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=identifier)
     workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
     name: Mapped[str] = mapped_column(String(200))
+    # Short public ID used in tracking links (?o=); assigned when a link is first shown.
+    public_number: Mapped[int | None] = mapped_column(Integer, unique=True)
     destination_url: Mapped[str] = mapped_column(String(2048))
     revenue: Mapped[Decimal] = mapped_column(Numeric(14, 4))
     payout: Mapped[Decimal] = mapped_column(Numeric(14, 4))
@@ -348,6 +359,8 @@ class FraudEvent(Base):
     workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
     offer_id: Mapped[str] = mapped_column(ForeignKey("offers.id"))
     click_id: Mapped[str | None] = mapped_column(ForeignKey("clicks.id"))
+    # The partner whose traffic was rejected, so they can see why it earned nothing.
+    publisher_id: Mapped[str | None] = mapped_column(String(32), index=True)
     ip_hash: Mapped[str | None] = mapped_column(String(64))
     reason: Mapped[str] = mapped_column(String(80))
     score: Mapped[int] = mapped_column(Integer)

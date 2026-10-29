@@ -41,6 +41,8 @@ class Rules(StrictModel):
     denied_networks: list[str] = Field(default_factory=list, max_length=100)
     clicks_per_ip_minute: int = Field(default=120, ge=1, le=10000)
     minimum_conversion_seconds: int = Field(default=0, ge=0, le=3600)
+    # Repeat clicks from the same visitor on the same link reuse their earlier click.
+    unique_click_hours: int = Field(default=0, ge=0, le=720)
 
     @model_validator(mode="after")
     def validate_rules(self):
@@ -197,7 +199,7 @@ def context(request):
     )
 
 
-def reject_fraud(db, offer, reason, score, ip_hash=None, click_id=None):
+def reject_fraud(db, offer, reason, score, ip_hash=None, click_id=None, publisher_id=None):
     db.add(
         FraudEvent(
             workspace_id=offer.workspace_id,
@@ -206,6 +208,7 @@ def reject_fraud(db, offer, reason, score, ip_hash=None, click_id=None):
             score=score,
             ip_hash=ip_hash,
             click_id=click_id,
+            publisher_id=publisher_id,
         )
     )
     db.commit()

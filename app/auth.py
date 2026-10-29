@@ -157,11 +157,15 @@ def register(body: Register, db: DB, response: Response):
     return create_registered_account(body, db, response)
 
 
+ACCOUNT_TYPES = {"brand_direct_advertiser": "brand", "influencer_creator": "influencer"}
+
+
 def create_registered_account(body, db, response=None):
     workspace = Workspace(
         name=body.company,
         trial_ends_at=datetime.now(timezone.utc) + timedelta(days=15),
         business_type=body.business_type,
+        account_type=ACCOUNT_TYPES.get(body.business_type, "network"),
         usage_types=body.usage_types,
         country=body.country,
         mobile=body.mobile,
@@ -220,6 +224,7 @@ def registration_options():
         "mobile_apps": "Mobile Apps",
         "media_buyer": "Media Buyer",
         "social_media_advertising": "Social Media Advertising",
+        "influencer_creator": "Influencer / Creator",
         "cpi_app_promotion": "CPI & App Promotion",
         "lead_generation": "Lead Generation",
         "e_commerce": "E-Commerce",

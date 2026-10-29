@@ -24,6 +24,7 @@ class Register(Credentials):
         "mobile_apps",
         "media_buyer",
         "social_media_advertising",
+        "influencer_creator",
     ]
     usage_types: list[
         Literal[
@@ -117,14 +118,15 @@ class Postback(StrictModel):
     sale_amount: Decimal | None = Field(default=None, gt=0, max_digits=14, decimal_places=4)
     sale_currency: str | None = Field(default=None, pattern=r"^[A-Z]{3}$")
     event_key: str = Field(default="initial", pattern=r"^[a-z][a-z0-9_]{0,63}$")
-    advertiser_parameters: dict[str, str] = Field(default_factory=dict, max_length=5)
+    advertiser_parameters: dict[str, str] = Field(default_factory=dict, max_length=6)
 
     @model_validator(mode="after")
     def valid_parameters(self):
-        if set(self.advertiser_parameters) - {f"adv_sub{i}" for i in range(1, 6)} or any(
+        allowed = {f"adv_sub{i}" for i in range(1, 6)} | {"coupon"}
+        if set(self.advertiser_parameters) - allowed or any(
             len(v) > 256 or any(ord(c) < 32 for c in v) for v in self.advertiser_parameters.values()
         ):
-            raise ValueError("Use bounded adv_sub1 through adv_sub5 parameters")
+            raise ValueError("Use bounded adv_sub1 through adv_sub5 and coupon parameters")
         return self
 
 

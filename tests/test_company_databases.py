@@ -134,8 +134,9 @@ def test_real_company_databases(company_client, monkeypatch):  # noqa: F811 -- p
                 headers=ha,
                 json={"offer_id": offer["id"], "affiliate_id": affiliate["id"]},
             ).json()
-            assert "/c/media/t/" in link["url"]
-            click = client.get(urlsplit(link["url"]).path, follow_redirects=False)
+            assert "/c/media/c?o=" in link["url"]
+            parts = urlsplit(link["url"])
+            click = client.get(parts.path + "?" + parts.query, follow_redirects=False)
             assert click.status_code == 302, click.text
             click_id = parse_qs(urlsplit(click.headers["location"]).query)["click_id"][0]
             postback = client.post(

@@ -1,6 +1,6 @@
 """Relational network operations; all references are scoped by workspace."""
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from sqlalchemy import (
     String,
@@ -9,6 +9,7 @@ from sqlalchemy import (
     Integer,
     Numeric,
     DateTime,
+    Date,
     JSON,
     ForeignKey,
     ForeignKeyConstraint,
@@ -253,6 +254,91 @@ class PeriodCapCounter(Base):
     cap_id: Mapped[str] = mapped_column(String(32))
     bucket: Mapped[str] = mapped_column(String(50))
     amount: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=0)
+
+
+class CampaignTarget(Base):
+    """A sales goal for tracking progress; unlike caps it never blocks conversions."""
+
+    __tablename__ = "campaign_targets"
+    __table_args__ = (
+        ForeignKeyConstraint(["workspace_id", "offer_id"], ["offers.workspace_id", "offers.id"]),
+        ForeignKeyConstraint(["workspace_id", "partner_id"], ["users.workspace_id", "users.id"]),
+        UniqueConstraint("workspace_id", "id"),
+        CheckConstraint("amount > 0", name="ck_campaign_target_amount"),
+        CheckConstraint("ends_on >= starts_on", name="ck_campaign_target_dates"),
+        Index("ix_campaign_target_campaign", "workspace_id", "offer_id", "id"),
+    )
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=identifier)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"))
+    offer_id: Mapped[str] = mapped_column(String(32))
+    # Empty for the campaign's overall goal; otherwise the agency or partner it is split to.
+    partner_id: Mapped[str | None] = mapped_column(String(32))
+    name: Mapped[str] = mapped_column(String(120))
+    event_key: Mapped[str] = mapped_column(String(64), default="initial")
+    amount: Mapped[int] = mapped_column(Integer)
+    starts_on: Mapped[date] = mapped_column(Date)
+    ends_on: Mapped[date] = mapped_column(Date)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class Placement(Base):
+    """A named post or spot (e.g. "Insta story 28 Oct") on an influencer's link, tracked as its sub ID."""
+
+    __tablename__ = "placements"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["workspace_id", "link_id"], ["tracking_links.workspace_id", "tracking_links.id"]
+        ),
+        UniqueConstraint("workspace_id", "id"),
+        UniqueConstraint("workspace_id", "link_id", "sub_id"),
+    )
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=identifier)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"))
+    link_id: Mapped[str] = mapped_column(String(32))
+    name: Mapped[str] = mapped_column(String(120))
+    platform: Mapped[str] = mapped_column(String(20))
+    sub_id: Mapped[str] = mapped_column(String(100))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class ManualResult(Base):
+    """Sales a brand reported only as totals; kept apart from click-attributed conversions."""
+
+    __tablename__ = "manual_results"
+    __table_args__ = (
+        ForeignKeyConstraint(["workspace_id", "offer_id"], ["offers.workspace_id", "offers.id"]),
+        UniqueConstraint("workspace_id", "id"),
+        CheckConstraint("sales >= 0 AND earnings >= 0", name="ck_manual_result_values"),
+        CheckConstraint("period_end >= period_start", name="ck_manual_result_dates"),
+    )
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=identifier)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"))
+    offer_id: Mapped[str] = mapped_column(String(32))
+    period_start: Mapped[date] = mapped_column(Date)
+    period_end: Mapped[date] = mapped_column(Date)
+    sales: Mapped[int] = mapped_column(Integer)
+    earnings: Mapped[Decimal] = mapped_column(Numeric(14, 4))
+    note: Mapped[str] = mapped_column(String(300), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class BlockedSource(Base):
+    """A traffic source an account refuses to pay for, account-wide or for one campaign."""
+
+    __tablename__ = "blocked_sources"
+    __table_args__ = (
+        ForeignKeyConstraint(["workspace_id", "offer_id"], ["offers.workspace_id", "offers.id"]),
+        UniqueConstraint("workspace_id", "id"),
+        Index("ix_blocked_source_workspace", "workspace_id", "active"),
+    )
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=identifier)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"))
+    offer_id: Mapped[str | None] = mapped_column(String(32))
+    preset: Mapped[str] = mapped_column(String(30))
+    # Domain for custom_domain, source/utm_source value for custom_source; empty for presets.
+    value: Mapped[str] = mapped_column(String(253), default="")
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
 class SmartLink(Base):

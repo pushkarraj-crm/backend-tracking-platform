@@ -3,7 +3,7 @@
 from decimal import Decimal
 from html import escape
 from typing import Literal
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import Field, HttpUrl, model_validator
@@ -21,6 +21,7 @@ from .network_models import (
     PeriodCap,
     PeriodCapCounter,
     PostbackReceipt,
+    CampaignTarget,
 )
 from .campaign_policy import (
     ProfileBody,
@@ -349,7 +350,11 @@ def creative_snippet(campaign_id: str, asset_id: str, db: DB, user: Actor):
     from .domains import link_base
 
     base = link_base(db, user, None)
-    target = escape(base + "/t/" + link.id, quote=True)
+    from .routes import link_url
+
+    tracking_url = link_url(db, base, link)
+    db.commit()
+    target = escape(tracking_url, quote=True)
     content = (
         escape(asset.name)
         if asset.kind == "text"
@@ -357,7 +362,7 @@ def creative_snippet(campaign_id: str, asset_id: str, db: DB, user: Actor):
     )
     return {
         "html": f'<a href="{target}" rel="sponsored noopener">{content}</a>',
-        "tracking_url": base + "/t/" + link.id,
+        "tracking_url": tracking_url,
         "impression_url": base + "/i/" + link.id,
     }
 
@@ -546,6 +551,129 @@ def caps(campaign_id: str, db: DB, user: Actor):
 @router.patch("/campaigns/{campaign_id}/caps/{cap_id}")
 def cap_active(campaign_id: str, cap_id: str, body: ActiveUpdate, db: DB, user: Actor):
     return active_update(db, user, campaign_id, cap_id, PeriodCap, body)
+
+
+class TargetBody(StrictModel):
+    name: str = Field(min_length=1, max_length=120)
+    partner_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
+    event_key: str = Field(default="initial", pattern=r"^[a-z][a-z0-9_]{0,63}$")
+    amount: int = Field(gt=0, le=100_000_000)
+    starts_on: date
+    ends_on: date
+
+    @model_validator(mode="after")
+    def valid(self):
+        if self.ends_on < self.starts_on:
+            raise ValueError("The end date must be on or after the start date")
+        return self
+
+
+def check_target(db, user, campaign_id, body):
+    manage_campaign(db, user, campaign_id)
+    validate_event_reference(db, user, campaign_id, body.event_key)
+    if body.partner_id and owned(db, User, body.partner_id, user).role not in {
+        "affiliate",
+        "publisher",
+    }:
+        raise HTTPException(422, "Select an agency or partner")
+
+
+def target_progress(db, target, today=None):
+    """Counts non-rejected conversions in the target's UTC date range; an agency includes its publishers."""
+    from datetime import timedelta
+    from .models import Click, Conversion
+
+    query = (
+        select(func.count(), func.coalesce(func.sum(Conversion.payout), 0))
+        .select_from(Conversion)
+        .join(Click, Click.id == Conversion.click_id)
+        .join(TrackingLink, TrackingLink.id == Click.link_id)
+        .where(
+            Conversion.workspace_id == target.workspace_id,
+            Conversion.offer_id == target.offer_id,
+            Conversion.event_key == target.event_key,
+            Conversion.status != "rejected",
+            Conversion.created_at
+            >= datetime.combine(target.starts_on, datetime.min.time(), timezone.utc),
+            Conversion.created_at
+            < datetime.combine(
+                target.ends_on + timedelta(days=1), datetime.min.time(), timezone.utc
+            ),
+        )
+    )
+    if target.partner_id:
+        team = select(User.id).where(
+            User.workspace_id == target.workspace_id,
+            (User.id == target.partner_id) | (User.parent_user_id == target.partner_id),
+        )
+        query = query.where(TrackingLink.affiliate_id.in_(team))
+    achieved, commission = db.execute(query).one()
+    today = today or datetime.now(timezone.utc).date()
+    days = (target.ends_on - target.starts_on).days + 1
+    elapsed = min(max((today - target.starts_on).days + 1, 0), days)
+    expected = target.amount * elapsed // days
+    pace = (
+        "not_started"
+        if today < target.starts_on
+        else ("met" if achieved >= target.amount else "missed")
+        if today > target.ends_on
+        else "ahead"
+        if achieved >= expected
+        else "behind"
+    )
+    return {
+        **serialize(target),
+        "achieved": achieved,
+        "percent": achieved * 100 // target.amount,
+        "expected_by_today": expected,
+        "pace": pace,
+        "commission": str(commission),
+    }
+
+
+@router.post("/campaigns/{campaign_id}/targets", status_code=201)
+def create_target(campaign_id: str, body: TargetBody, db: DB, user: Actor):
+    check_target(db, user, campaign_id, body)
+    row = bounded_create(db, user, campaign_id, CampaignTarget, body.model_dump())
+    return target_progress(db, row)
+
+
+@router.put("/campaigns/{campaign_id}/targets/{target_id}")
+def edit_target(campaign_id: str, target_id: str, body: TargetBody, db: DB, user: Actor):
+    check_target(db, user, campaign_id, body)
+    update_configuration(db, user, campaign_id, target_id, CampaignTarget, body)
+    return target_progress(db, owned(db, CampaignTarget, target_id, user))
+
+
+@router.get("/campaigns/{campaign_id}/targets")
+def targets(campaign_id: str, db: DB, user: Actor):
+    manage_campaign(db, user, campaign_id)
+    return [target_progress(db, row) for row in scoped_rows(db, user, campaign_id, CampaignTarget)]
+
+
+@router.patch("/campaigns/{campaign_id}/targets/{target_id}")
+def target_active(campaign_id: str, target_id: str, body: ActiveUpdate, db: DB, user: Actor):
+    return active_update(db, user, campaign_id, target_id, CampaignTarget, body)
+
+
+@router.get("/targets")
+def all_targets(db: DB, user: Actor):
+    """Active targets across campaigns, for the brand home dashboard."""
+    if user.role not in {"admin", "staff", "advertiser"}:
+        raise HTTPException(403, "Campaign management role required")
+    query = (
+        select(CampaignTarget, Offer.name, Offer.currency)
+        .join(Offer, Offer.id == CampaignTarget.offer_id)
+        .where(CampaignTarget.workspace_id == user.workspace_id, CampaignTarget.active.is_(True))
+        .order_by(CampaignTarget.ends_on, CampaignTarget.id)
+        .limit(100)
+    )
+    if user.role == "advertiser":
+        query = query.where(Offer.advertiser_id == user.id)
+    return [
+        {**target_progress(db, row), "campaign_name": name, "currency": currency}
+        for row, name, currency in db.execute(query)
+    ]
 
 
 @router.get("/postback-receipts")

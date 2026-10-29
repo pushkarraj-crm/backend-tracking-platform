@@ -1,11 +1,11 @@
 """Shared click authorization for redirects and consent-gated direct-page capture."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from fastapi import HTTPException
 from sqlalchemy import select
 from .models import TrackingLink, Offer, User, Workspace, CampaignApplication, Click, identifier
 from .services import entitlement
-from .campaign_policy import parameters, destination, rule_values, matches
+from .campaign_policy import parameters, destination, rule_values, matches, PASSTHROUGH_PARAMETERS
 
 
 def resolve_link(db, link_id):
@@ -37,7 +37,8 @@ def resolve_link(db, link_id):
 
 
 def record_click(db, request, link_id, sub_id=None):
-    from .tracking import check_click, reserve
+    from .tracking import check_click, reserve, reject_fraud, Rules
+    from .sources import blocked_preset, referrer_domain
     from .domains import enforce_tracking_host
     from .network_models import TrafficRule
     from .period_caps import reserve as reserve_period_caps
@@ -48,15 +49,47 @@ def record_click(db, request, link_id, sub_id=None):
     if sub_id is not None and (len(sub_id) > 100 or any(ord(c) < 32 for c in sub_id)):
         raise HTTPException(422, "Invalid placement sub ID")
     at = datetime.now(timezone.utc)
+    rules = Rules.model_validate(offer.tracking_rules)
+    if rules.unique_click_hours and metadata.get("ip_hash"):
+        earlier = db.scalar(
+            select(Click)
+            .where(
+                Click.workspace_id == link.workspace_id,
+                Click.link_id == link.id,
+                Click.ip_hash == metadata["ip_hash"],
+                Click.created_at >= at - timedelta(hours=rules.unique_click_hours),
+            )
+            .order_by(Click.created_at.desc())
+            .limit(1)
+        )
+        if earlier:
+            target = destination(
+                db,
+                offer,
+                link,
+                earlier,
+                request.query_params.get("url"),
+                request.query_params.get("destination_id"),
+                parameters(request.query_params, PASSTHROUGH_PARAMETERS),
+            )
+            return link, offer, earlier, target
     click = Click(
         id=identifier(),
         workspace_id=link.workspace_id,
         link_id=link.id,
         sub_id=sub_id,
         created_at=at,
-        attributes=parameters(request.query_params),
+        attributes={
+            **parameters(request.query_params),
+            "referrer": referrer_domain(request),
+        },
         **metadata,
     )
+    blocked = blocked_preset(db, offer, click.attributes)
+    if blocked:
+        reject_fraud(
+            db, offer, "blocked_source:" + blocked, 100, click.ip_hash, publisher_id=publisher.id
+        )
     values = rule_values(click, publisher.id)
     for rule in db.scalars(
         select(TrafficRule)
@@ -80,6 +113,7 @@ def record_click(db, request, link_id, sub_id=None):
         click,
         request.query_params.get("url"),
         request.query_params.get("destination_id"),
+        parameters(request.query_params, PASSTHROUGH_PARAMETERS),
     )
     reserve(db, offer, "clicks", at)
     reserve_period_caps(db, offer, publisher.id, "click", at)

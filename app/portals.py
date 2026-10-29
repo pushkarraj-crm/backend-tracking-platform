@@ -33,6 +33,7 @@ def workspace_output(workspace):
         for k in (
             "id",
             "name",
+            "account_type",
             "active",
             "plan",
             "subscription_status",

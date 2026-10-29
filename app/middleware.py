@@ -111,8 +111,18 @@ class SecurityMiddleware:
                     "auth"
                     if path.startswith("/auth/")
                     else "tracking"
-                    if path.startswith(
-                        ("/t/", "/i/", "/capture/", "/s/", "/c/", "/postbacks/", "/billing/webhook")
+                    if path == "/c"
+                    or path.startswith(
+                        (
+                            "/t/",
+                            "/i/",
+                            "/capture/",
+                            "/s/",
+                            "/c/",
+                            "/postbacks/",
+                            "/pb/",
+                            "/billing/webhook",
+                        )
                     )
                     else "api"
                 )

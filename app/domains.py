@@ -269,7 +269,9 @@ class DomainHostMiddleware:
             and (scope.get("client") or ("", 0))[0] == get_settings().trusted_gateway_ip
         ):
             return await self.app(scope, receive, send)
-        if scope["path"].startswith(("/t/", "/i/", "/capture/", "/s/", "/l/")):
+        if scope["path"] == "/c" or scope["path"].startswith(
+            ("/t/", "/i/", "/capture/", "/s/", "/l/")
+        ):
 
             def permitted():
                 with SessionLocal() as db:

@@ -153,6 +153,24 @@ def ingest(db, offer, body, offline=False):
         if matches(rule.conditions, values):
             state = {"approve": "approved", "reject": "rejected", "pending": "pending"}[rule.action]
             break
+    from .sources import blocked_preset
+    from .models import FraudEvent
+
+    blocked = blocked_preset(db, offer, click.attributes or {})
+    if blocked:
+        # The click predates the block; the conversion is kept for the record but earns nothing.
+        state = "rejected"
+        db.add(
+            FraudEvent(
+                workspace_id=offer.workspace_id,
+                offer_id=offer.id,
+                click_id=click.id,
+                publisher_id=link.affiliate_id,
+                ip_hash=click.ip_hash,
+                reason="blocked_source:" + blocked,
+                score=100,
+            )
+        )
     at = datetime.now(timezone.utc)
     reserve(db, offer, "conversions", at, revenue=revenue)
     reserve_period_caps(
@@ -185,19 +203,44 @@ def ingest(db, offer, body, offline=False):
     db.add(conversion)
     db.flush()
     if state != "pending":
-        actor = (
-            db.get(User, offer.advertiser_id)
-            if offer.advertiser_id
-            else db.scalar(
-                select(User)
-                .where(User.workspace_id == offer.workspace_id, User.role == "admin")
-                .order_by(User.id)
-            )
-        )
-        if not actor:
-            raise HTTPException(409, "Campaign owner is unavailable")
-        transition(db, actor, conversion, state)
+        transition(db, campaign_actor(db, offer), conversion, state)
     return conversion, False
+
+
+def campaign_actor(db, offer):
+    """The account that automated status changes are attributed to."""
+    actor = (
+        db.get(User, offer.advertiser_id)
+        if offer.advertiser_id
+        else db.scalar(
+            select(User)
+            .where(User.workspace_id == offer.workspace_id, User.role == "admin")
+            .order_by(User.id)
+        )
+    )
+    if not actor:
+        raise HTTPException(409, "Campaign owner is unavailable")
+    return actor
+
+
+def approve_lead(db, user, offer, reference, event_key):
+    """An approved later stage (e.g. disbursal) proves the lead; rejected leads stay rejected."""
+    if event_key == "initial":
+        return False
+    lead = db.scalar(
+        select(Conversion)
+        .where(
+            Conversion.workspace_id == offer.workspace_id,
+            Conversion.offer_id == offer.id,
+            Conversion.transaction_id == reference,
+            Conversion.event_key == "initial",
+            Conversion.status == "pending",
+        )
+        .with_for_update()
+    )
+    if lead:
+        transition(db, user, lead, "approved")
+    return bool(lead)
 
 
 def transition(db, user, conversion, status):

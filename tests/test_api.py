@@ -752,6 +752,7 @@ def test_signup_options_match_requested_business_types(client):
         "Mobile Apps",
         "Media Buyer",
         "Social Media Advertising",
+        "Influencer / Creator",
     ]
     assert len(options["countries"]) > 200
     assert options["trial_days"] == 15 and not options["credit_card_required"]

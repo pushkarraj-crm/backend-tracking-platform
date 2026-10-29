@@ -26,6 +26,19 @@ TRACKED_PARAMETERS = {
     "utm_campaign",
     "utm_content",
     "utm_term",
+    "deviceid",
+    "androidid",
+    "googleaid",
+    "iosidfa",
+}
+# Forwarded to the advertiser only; personal data is never stored or logged.
+PASSTHROUGH_PARAMETERS = {
+    "t_first_name",
+    "t_last_name",
+    "t_email",
+    "t_phone",
+    "t_address",
+    *[f"t_sub{i}" for i in range(1, 11)],
 }
 MACROS = {
     "tid",
@@ -159,6 +172,7 @@ class EventBody(StrictModel):
 
 
 CONDITION_FIELDS = {
+    "referrer",
     "country",
     "device",
     "operating_system",
@@ -304,9 +318,9 @@ def public_settings(offer, user):
     return value
 
 
-def parameters(query):
+def parameters(query, names=TRACKED_PARAMETERS):
     result = {}
-    for key in TRACKED_PARAMETERS:
+    for key in names:
         values = (
             query.getlist(key)
             if hasattr(query, "getlist")
@@ -322,7 +336,7 @@ def parameters(query):
     return result
 
 
-def destination(db, offer, link, click, requested_url=None, destination_id=None):
+def destination(db, offer, link, click, requested_url=None, destination_id=None, passthrough=None):
     from .network_models import CampaignDestination
 
     settings = policy(offer)
@@ -391,6 +405,7 @@ def destination(db, offer, link, click, requested_url=None, destination_id=None)
     incoming = {k: v for k, v in click.attributes.items() if k in TRACKED_PARAMETERS}
     query = [(k, v) for k, v in query if k not in incoming]
     query.extend(incoming.items())
+    query.extend((passthrough or {}).items())
     query.append(("click_id", click.id))
     return urlunsplit(parts._replace(query=urlencode(query)))
 

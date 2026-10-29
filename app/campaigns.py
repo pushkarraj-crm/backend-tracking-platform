@@ -8,12 +8,12 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import Field, HttpUrl, model_validator
 from sqlalchemy import select, or_
 from sqlalchemy.exc import IntegrityError
-from .campaign_policy import CatalogSettings, ProfileBody
+from .campaign_policy import CatalogSettings, EventBody, ProfileBody
 from .tracking import Rules
 from .schemas import StrictModel, OfferCreate, ActiveUpdate
-from .security import DB, Actor, key_hash
-from .models import Offer, User, CampaignApplication, TrackingLink, WebhookEndpoint
-from .routes import owned, entitled, output_offer, quota, rotate_key
+from .security import DB, Actor, key_hash, passwords
+from .models import Offer, User, CampaignApplication, TrackingLink, WebhookEndpoint, Workspace
+from .routes import owned, entitled, output_offer, quota, rotate_key, link_url
 from .services import audit
 from .domains import link_base
 from .config import get_settings
@@ -30,6 +30,8 @@ class CampaignBody(OfferCreate):
         default=None, gt=0, le=100, max_digits=7, decimal_places=4
     )
     description: str = Field(default="", max_length=10000)
+    # Funnel stages (e.g. approved, disbursed) created together with the campaign.
+    events: list[EventBody] = Field(default_factory=list, max_length=20)
 
     @model_validator(mode="after")
     def rate(self):
@@ -51,6 +53,8 @@ class CampaignBody(OfferCreate):
             raise ValueError("CPS campaigns require a sale commission percentage")
         if self.campaign_model == "CPL" and self.sale_percentage is not None:
             raise ValueError("Only CPS campaigns use sale commission percentages")
+        if len({e.code for e in self.events}) != len(self.events):
+            raise ValueError("Each funnel stage needs a unique code")
         return self
 
 
@@ -111,9 +115,33 @@ def campaign_output(campaign, user):
     return result
 
 
+def house_advertiser(db, workspace):
+    """A brand account is its own advertiser: one login-less advertiser record owns its campaigns."""
+    email = f"brand@{workspace.id}.house.invalid"
+    advertiser = db.scalar(
+        select(User).where(User.workspace_id == workspace.id, User.email == email)
+    )
+    if not advertiser:
+        advertiser = User(
+            workspace_id=workspace.id,
+            email=email,
+            # Nobody knows this password, so the record cannot sign in.
+            password_hash=passwords.hash(secrets.token_urlsafe(32)),
+            role="advertiser",
+            full_name=workspace.name,
+            email_verified=True,
+        )
+        db.add(advertiser)
+        db.flush()
+    return advertiser
+
+
 def create_campaign_record(body, db, user):
     if user.role not in {"advertiser", "admin", "staff"}:
         raise HTTPException(403, "Advertiser access required")
+    workspace = db.get(Workspace, user.workspace_id)
+    if workspace.account_type == "brand" and user.role != "advertiser":
+        body = body.model_copy(update={"advertiser_id": house_advertiser(db, workspace).id})
     if user.role != "advertiser" and not body.advertiser_id:
         raise HTTPException(422, "Select the advertiser responsible for this campaign")
     advertiser_id = user.id if user.role == "advertiser" else body.advertiser_id
@@ -127,7 +155,14 @@ def create_campaign_record(body, db, user):
     campaign = Offer(
         workspace_id=user.workspace_id,
         **body.model_dump(
-            exclude={"destination_url", "advertiser_id", "settings", "tracking_rules", "active"}
+            exclude={
+                "destination_url",
+                "advertiser_id",
+                "settings",
+                "tracking_rules",
+                "active",
+                "events",
+            }
         ),
         destination_url=str(body.destination_url),
         advertiser_id=advertiser_id,
@@ -138,6 +173,14 @@ def create_campaign_record(body, db, user):
     )
     db.add(campaign)
     db.flush()
+    from .network_models import CampaignEvent
+
+    for event in body.events:
+        db.add(
+            CampaignEvent(
+                workspace_id=user.workspace_id, offer_id=campaign.id, **event.model_dump()
+            )
+        )
     audit(db, user, "campaign.created", campaign.id)
     return campaign, key
 
@@ -454,9 +497,11 @@ def publisher_link(
         .order_by(LandingPage.id)
         .limit(100)
     )
+    url = link_url(db, base, link)
+    db.commit()  # keep the public numbers assigned for this link
     return {
         "id": link.id,
-        "url": f"{base}/t/{link.id}",
+        "url": url,
         "capture_url": f"{base}/capture/{link.id}",
         "impression_url": f"{base}/i/{link.id}",
         "sdk_url": get_settings().public_base_url.rstrip("/") + "/sdk/relay.js",

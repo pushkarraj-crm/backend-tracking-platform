@@ -66,6 +66,26 @@ report is idempotent. Mappings are not saved yet, and uploads are bounded by the
 64 KB request limit (about 600 rows). The Frontend exposes it under Network tools →
 MIS upload.
 
+## Current delivery: global postback (project 1 of the account-types design)
+
+`GET|POST /pb/{account_token}` accepts `click_id` (required), `event`, `txn_id`,
+`amount`, `currency`, `status`, `coupon` and `adv_sub1–5`; the click identifies the
+campaign. It shares ingestion, receipts and IP allowlists with the per-campaign
+endpoint, which keeps working. `status` updates an existing conversion; approving a
+later stage approves the pending lead. `amount` is ignored for CPL events. The secret
+is created on first view of `GET /postback-settings` and rotated by an admin with
+`POST /postback-settings/rotate`. Links also accept `deviceid`, `androidid`,
+`googleaid` and `iosidfa` (stored) and forward `t_*` values without storing them.
+See `docs/superpowers/specs/2026-10-29-account-types-and-global-postback-design.md`.
+
+Platform templates (project 2): the Postbacks page builds the partner-postback URL
+for Trackier, Offer18, Affise, Everflow and Impact (macros verified 2026-10-29 against
+each help centre, listed in Frontend `src/platform-templates.ts`) or custom macros.
+Templates omit `event` and `status` because those platforms' values do not match
+Relay's. AppsFlyer requires Relay to be a registered integrated partner and Adjust
+needs a partner setup, so neither is offered yet. `currency` is only checked when
+`amount` prices the event.
+
 ## Delivery order
 
 1. Campaign setup/templates/cloning and conversion ingestion/attribution.

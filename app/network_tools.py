@@ -61,7 +61,7 @@ def import_campaigns(body: ImportBody, db: DB, user: Actor):
     workspace = db.get(Workspace, user.workspace_id)
     entitlement(workspace)
     stream = csv.DictReader(io.StringIO(body.csv_content.lstrip("\ufeff")))
-    allowed = set(CampaignBody.model_fields)
+    allowed = set(CampaignBody.model_fields) - {"events"}
     fields = stream.fieldnames or []
     if not fields or len(fields) != len(set(fields)) or set(fields) - allowed:
         raise HTTPException(422, "CSV must use unique supported campaign field headings")
@@ -227,6 +227,7 @@ def import_conversions(body: MisImportBody, db: DB, user: Actor):
     from decimal import InvalidOperation
     from sqlalchemy.exc import IntegrityError
     from .conversion_engine import ingest, transition
+    from .conversion_engine import approve_lead as shared_approve_lead
     from .schemas import Postback
 
     employee_capability(user, "conversions:review")
@@ -245,22 +246,9 @@ def import_conversions(body: MisImportBody, db: DB, user: Actor):
     counts = {"created": 0, "updated": 0, "unchanged": 0, "ignored": 0, "leads_approved": 0}
 
     def approve_lead(reference, action):
-        # An approved later stage (e.g. disbursal) proves the lead; rejected leads stay rejected.
-        if action.event_key == "initial" or action.status != "approved":
-            return
-        lead = db.scalar(
-            select(Conversion)
-            .where(
-                Conversion.workspace_id == offer.workspace_id,
-                Conversion.offer_id == offer.id,
-                Conversion.transaction_id == reference,
-                Conversion.event_key == "initial",
-                Conversion.status == "pending",
-            )
-            .with_for_update()
-        )
-        if lead:
-            transition(db, user, lead, "approved")
+        if action.status == "approved" and shared_approve_lead(
+            db, user, offer, reference, action.event_key
+        ):
             counts["leads_approved"] += 1
 
     unmatched, errors = [], []
