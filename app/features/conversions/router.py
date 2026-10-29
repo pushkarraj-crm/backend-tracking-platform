@@ -31,7 +31,7 @@ def postback(
     return accept_postback(db, offer, body, request)
 
 
-def accept_postback(db, offer, body, request, status=None):
+def accept_postback(db, offer, body, request, status=None, offline=False):
     """Shared by per-campaign and global postbacks: policy, ingest, receipts, status updates."""
     import ipaddress
 
@@ -72,7 +72,7 @@ def accept_postback(db, offer, body, request, status=None):
             if not permitted:
                 raise HTTPException(403, "Advertiser postback IP is not permitted")
         try:
-            conversion, duplicate = ingest(db, offer, body)
+            conversion, duplicate = ingest(db, offer, body, offline=offline)
             db.flush()
         except IntegrityError:
             db.rollback()
@@ -143,16 +143,41 @@ def receive_global_postback(db, token, values, request):
     )
     if not workspace:
         raise HTTPException(401, "Invalid postback credentials")
+    from app.features.coupons.router import coupon_click, usable_coupon
+
     click = db.scalar(
         select(Click).where(
             Click.id == values.get("click_id", ""), Click.workspace_id == workspace.id
         )
     )
-    if not click:
-        raise HTTPException(404, "Click not found")
-    offer = db.get(Offer, db.get(TrackingLink, click.link_id).offer_id)
     event = values.get("event", "").lower()
     event_key = "initial" if event in GLOBAL_EVENTS else event
+    if values.get("coupon"):
+        values["coupon"] = values["coupon"].upper()  # codes are case-insensitive
+    coupon = usable_coupon(db, workspace.id, values["coupon"]) if values.get("coupon") else None
+    link = db.get(TrackingLink, click.link_id) if click else None
+    # A partner's coupon code wins over a click from someone else (or no click at all).
+    by_coupon = bool(coupon) and (
+        not link or (link.offer_id, link.affiliate_id) != (coupon.offer_id, coupon.partner_id)
+    )
+    if by_coupon:
+        if not values.get("txn_id"):
+            raise HTTPException(422, "txn_id is required when a sale is credited by coupon")
+        earlier = db.scalar(
+            select(Conversion).where(
+                Conversion.workspace_id == workspace.id,
+                Conversion.offer_id == coupon.offer_id,
+                Conversion.event_key == event_key,
+                Conversion.transaction_id == values["txn_id"],
+            )
+        )
+        click = db.get(Click, earlier.click_id) if earlier else coupon_click(db, coupon)
+    if not click:
+        raise HTTPException(
+            404,
+            "Click not found" if values.get("click_id") else "Send a click_id or a valid coupon",
+        )
+    offer = db.get(Offer, db.get(TrackingLink, click.link_id).offer_id)
     model = offer.campaign_model
     if event_key != "initial":
         model = db.scalar(
@@ -183,7 +208,16 @@ def receive_global_postback(db, token, values, request):
         )
     except ValidationError as error:
         raise HTTPException(422, "; ".join(e["msg"] for e in error.errors())) from None
-    return accept_postback(db, offer, body, request, status)
+    result = accept_postback(db, offer, body, request, status, offline=by_coupon)
+    if by_coupon and isinstance(result, dict):  # a new sale, not a repeated postback
+        from sqlalchemy import update
+
+        from app.persistence.network_models import Coupon
+
+        # Atomic increment; the quota was checked under a row lock before the sale was recorded.
+        db.execute(update(Coupon).where(Coupon.id == coupon.id).values(uses=Coupon.uses + 1))
+        db.commit()
+    return result
 
 
 def account_postback_url(db, workspace):

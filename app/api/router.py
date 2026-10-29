@@ -13,6 +13,7 @@ from app.features.campaigns.configuration import router as network_router
 from app.features.campaigns.offers import router as offers_router
 from app.features.campaigns.router import router as campaign_router
 from app.features.conversions.router import router as conversions_router
+from app.features.coupons.router import router as coupons_router
 from app.features.domains.router import router as domains_router
 from app.features.influencer.router import router as influencer_router
 from app.features.partners.router import router as core_router
@@ -56,3 +57,4 @@ router.include_router(smart_links_router)
 router.include_router(automation_router)
 router.include_router(influencer_router)
 router.include_router(sources_router)
+router.include_router(coupons_router)

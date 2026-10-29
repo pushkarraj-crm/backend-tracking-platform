@@ -1248,3 +1248,94 @@ def test_unique_click_window_reuses_the_visitors_earlier_click(client):
     # The fixture's click came from this same visitor within the window, so it is reused.
     assert click_id() == click and click_id() == click
     assert len(client.get("/reports/clicks", headers=pub).json()) == 1
+
+
+def test_coupons_credit_sales_without_clicks_and_win_over_other_partners(client):
+    admin, adv, pub, advertiser, publisher, campaign, link, click = campaign_flow(client)
+    body = {"campaign_id": campaign["id"], "partner_id": publisher["id"], "code": "priya10"}
+    created = client.post("/coupons", headers=admin, json=body)
+    assert created.status_code == 201 and created.json()["code"] == "PRIYA10", created.text
+    assert (
+        client.post("/coupons", headers=admin, json={**body, "code": "PRIYA10"}).status_code == 409
+    )
+    assert client.post("/coupons", headers=admin, json={**body, "code": "a b"}).status_code == 422
+    assert client.post("/coupons", headers=pub, json={**body, "code": "MINE"}).status_code == 403
+    stranger, _ = partner(client, admin, "publisher", "stranger")
+    unapproved = {**body, "partner_id": stranger["id"], "code": "STRANGER"}
+    assert client.post("/coupons", headers=admin, json=unapproved).status_code == 422
+
+    pb = client.get("/postback-settings", headers=admin).json()["url"]
+    pb = "/pb/" + pb.rsplit("/pb/", 1)[1]
+    first = client.get(pb, params={"coupon": "priya10", "txn_id": "ORD1"})
+    assert first.status_code == 201, first.text
+    assert client.get(pb, params={"coupon": "PRIYA10", "txn_id": "ORD1"}).status_code == 200
+    assert client.get(pb, params={"coupon": "PRIYA10"}).status_code == 422
+    assert client.get(pb, params={"coupon": "NOPE", "txn_id": "X"}).status_code == 404
+
+    # Another partner's click loses to the coupon's partner.
+    rival, rival_headers = partner(client, admin, "publisher", "rival")
+    application = client.post(
+        f"/campaigns/{campaign['id']}/apply", headers=rival_headers, json={"message": "ads"}
+    ).json()
+    client.patch(
+        f"/campaign-applications/{application['id']}", headers=adv, json={"status": "approved"}
+    )
+    rival_link = client.post(f"/campaigns/{campaign['id']}/link", headers=rival_headers).json()
+    redirect = client.get("/t/" + rival_link["id"], follow_redirects=False)
+    rival_click = parse_qs(urlsplit(redirect.headers["location"]).query)["click_id"][0]
+    won = client.get(pb, params={"click_id": rival_click, "coupon": "PRIYA10", "txn_id": "ORD2"})
+    assert won.status_code == 201, won.text
+    mine = client.get("/coupons/mine", headers=pub).json()
+    assert (mine[0]["code"], mine[0]["uses"], mine[0]["conversions"]) == ("PRIYA10", 2, 2)
+    assert client.get("/coupons/mine", headers=rival_headers).json() == []
+
+    # The quota stops further coupon credit.
+    code_id = created.json()["id"]
+    client.patch(f"/coupons/{code_id}", headers=admin, json={"quota": 2})
+    assert client.get(pb, params={"coupon": "PRIYA10", "txn_id": "ORD3"}).status_code == 404
+    client.patch(f"/coupons/{code_id}", headers=admin, json={"active": False, "quota": 5})
+    assert client.get(pb, params={"coupon": "PRIYA10", "txn_id": "ORD3"}).status_code == 404
+
+    csv_body = {"campaign_id": campaign["id"], "partner_id": publisher["id"]}
+    duplicate = "code,quota\nDIWALI1,10\nDIWALI1,5\n"
+    preview = client.post(
+        "/coupons/import", headers=admin, json={**csv_body, "csv_content": duplicate}
+    )
+    assert preview.json()["errors"][0]["row"] == 3
+    good = "code,quota,ends_on\nDIWALI1,10,2030-01-01\nDIWALI2,,\n"
+    imported = client.post(
+        "/coupons/import", headers=admin, json={**csv_body, "csv_content": good, "dry_run": False}
+    )
+    assert imported.status_code == 200 and imported.json()["codes"] == 2, imported.text
+    assert len(client.get("/coupons", headers=admin).json()) == 3
+
+
+def test_creator_coupons_belong_to_the_creator(client):
+    from test_api import signup_body
+
+    me = {
+        "Authorization": "Bearer "
+        + client.post(
+            "/auth/register",
+            json={**signup_body("Coupon Creator"), "business_type": "influencer_creator"},
+        ).json()["access_token"]
+    }
+    brand = client.post("/brands", headers=me, json={"name": "Mamaearth"}).json()
+    deal = client.post(
+        "/campaigns",
+        headers=me,
+        json={
+            "name": "Glow kit",
+            "destination_url": "https://mama.example/kit",
+            "revenue": "45",
+            "payout": "45",
+            "advertiser_id": brand["id"],
+        },
+    ).json()
+    coupon = client.post("/coupons", headers=me, json={"campaign_id": deal["id"], "code": "GLOW10"})
+    assert coupon.status_code == 201, coupon.text
+    pb = client.get("/postback-settings", headers=me).json()["url"]
+    sale = client.get("/pb/" + pb.rsplit("/pb/", 1)[1], params={"coupon": "glow10", "txn_id": "M1"})
+    assert sale.status_code == 201, sale.text
+    summary = client.get("/influencer/summary", headers=me).json()
+    assert (summary["deals"][0]["sales"], summary["deals"][0]["earnings"]) == (1, "45.0000")

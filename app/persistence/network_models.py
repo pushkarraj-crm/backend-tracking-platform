@@ -324,6 +324,33 @@ class ManualResult(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
+class Coupon(Base):
+    """A coupon code for one campaign and partner; sales using it are credited to that partner."""
+
+    __tablename__ = "coupons"
+    __table_args__ = (
+        ForeignKeyConstraint(["workspace_id", "offer_id"], ["offers.workspace_id", "offers.id"]),
+        ForeignKeyConstraint(["workspace_id", "partner_id"], ["users.workspace_id", "users.id"]),
+        UniqueConstraint("workspace_id", "id"),
+        UniqueConstraint("workspace_id", "code"),
+        CheckConstraint("quota IS NULL OR quota > 0", name="ck_coupon_quota"),
+        CheckConstraint("uses >= 0", name="ck_coupon_uses"),
+    )
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=identifier)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"))
+    offer_id: Mapped[str] = mapped_column(String(32))
+    partner_id: Mapped[str] = mapped_column(String(32))
+    # Stored upper-case so codes match regardless of how checkouts report them.
+    code: Mapped[str] = mapped_column(String(64))
+    description: Mapped[str] = mapped_column(String(300), default="")
+    starts_on: Mapped[date | None] = mapped_column(Date)
+    ends_on: Mapped[date | None] = mapped_column(Date)
+    quota: Mapped[int | None] = mapped_column(Integer)
+    uses: Mapped[int] = mapped_column(Integer, default=0)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
 class BlockedSource(Base):
     """A traffic source an account refuses to pay for, account-wide or for one campaign."""
 

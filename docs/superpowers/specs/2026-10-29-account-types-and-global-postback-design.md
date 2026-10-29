@@ -105,13 +105,17 @@ Each project is planned and shipped separately, in this order (each builds on th
 3. Account types and dashboards (brand targets, influencer workspace) — done 2026-10-29
 4. Offer18-style campaign creation with vertical templates — done 2026-10-29
 5. Blocked traffic sources (plus Offer18 anti-fraud gaps: unique-click limit, proxy detection) — built 2026-10-29; proxy detection not built (needs an IP-reputation data source)
-6. Redesign
+6. Redesign — theme and the three home dashboards done 2026-10-29; other screens restyle via the theme, layouts to be reworked one by one
 
 Added 2026-10-29 from the [Offer18 function review](../../offer18-function-review.md) (P1 gaps),
 each a separate project to schedule after the list above unless the owner reorders:
 
 7. Coupons: codes per campaign and partner, validity and quota, coupon-only
-   attribution, coupon reports and CSV import.
+   attribution, coupon reports and CSV import. — done 2026-10-29. A coupon sale
+   without a click is recorded on a marked "coupon click" (sub_id `coupon:CODE`) so
+   pricing, caps and reports work unchanged; such sales therefore also add one click.
+   A partner's coupon wins over another partner's click. MIS upload does not yet read
+   a coupon column.
 8. Shopify and Indian checkouts (Shiprocket, GoKwik, Razorpay Magic Checkout, Flexype)
    and WooCommerce, via a conversion pixel / Web SDK.
 9. Capping over-actions (pending, accept, reject, stop campaign, fallback) and fallback
