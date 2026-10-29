@@ -1557,7 +1557,8 @@ def _queued_alerts():
 
 
 SLACK_HOOK = "https://hooks.slack.com/services/T000/B000/abcdefghijklmnopqrstuvwx"
-BOT_TOKEN = "123456789:AAAbbbCCCdddEEEfffGGGhhhIIIjjjKKKl"
+# Synthetic credential for validation and redaction tests; never contacts Telegram.
+BOT_TOKEN = f"{123456789}:{'A' * 35}"
 
 
 def test_alert_settings_keep_secrets_and_test_messages_never_leak_them(client, monkeypatch):
