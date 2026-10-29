@@ -64,6 +64,7 @@ def list_links(
     offset: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=100),
     tracking_domain_id: str | None = Query(None, pattern=r"^[a-f0-9]{32}$"),
+    offer_id: str | None = Query(None, pattern=r"^[a-f0-9]{32}$"),
 ):
     entitled(db, user)
     from app.features.domains.router import link_base
@@ -74,6 +75,8 @@ def list_links(
     query = select(TrackingLink).where(TrackingLink.workspace_id == user.workspace_id)
     if user.role in {"affiliate", "publisher"}:
         query = query.where(TrackingLink.affiliate_id.in_(visible_users(user)))
+    if offer_id:
+        query = query.where(TrackingLink.offer_id == offer_id)
     rows = [
         {
             "id": link.id,

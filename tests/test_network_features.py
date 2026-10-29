@@ -1852,3 +1852,31 @@ def test_postback_token_can_be_a_parameter_and_app_events_map_to_stages(client):
         params={"token": token, "click_id": click, "txn_id": "DEVICE1", "event": "af_level_up"},
     )
     assert unknown.status_code in {404, 422}, unknown.text
+
+
+def test_links_can_be_listed_for_one_campaign(client):
+    admin, adv, pub, advertiser, publisher, campaign, link, click = campaign_flow(client)
+    other = client.post(
+        "/campaigns",
+        headers=adv,
+        json={
+            "name": "Other",
+            "destination_url": "https://brand.example/o",
+            "revenue": "1",
+            "payout": "1",
+        },
+    ).json()
+    client.post(
+        f"/campaigns/{other['id']}/assign",
+        headers=admin,
+        json={"publisher_id": publisher["id"], "status": "approved"},
+    )
+    assert (
+        client.post(
+            "/links", headers=admin, json={"offer_id": other["id"], "affiliate_id": publisher["id"]}
+        ).status_code
+        == 201
+    )
+    assert len(client.get("/links", headers=admin).json()) == 2
+    only = client.get("/links", headers=admin, params={"offer_id": campaign["id"]}).json()
+    assert [r["id"] for r in only] == [link["id"]]
