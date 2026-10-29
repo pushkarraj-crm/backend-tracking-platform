@@ -5,20 +5,20 @@ Run `python scripts/company_dev.py prepare` or `python scripts/company_dev.py se
 """
 
 import argparse
+import json
 import os
-from pathlib import Path
 import signal
 import subprocess
 import sys
 import time
-import json
+from pathlib import Path
 
 from cryptography.fernet import Fernet
 from dotenv import dotenv_values
+from psycopg import sql
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.pool import NullPool
-from psycopg import sql
 
 
 def main():
@@ -82,7 +82,7 @@ def main():
         subprocess.run([sys.executable, *arguments], cwd=root, env=environment, check=True)
 
     run("-m", "alembic", "upgrade", "head")
-    run("-c", "from app.tenancy import migrate_companies; migrate_companies()")
+    run("-c", "from app.tenancy.service import migrate_companies; migrate_companies()")
     print(
         f"Company development mode ready. API: http://127.0.0.1:{args.port}; frontend: http://localhost:{args.frontend_port}",
         flush=True,

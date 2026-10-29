@@ -2,16 +2,22 @@
 
 import argparse
 import sys
-from pathlib import Path
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from pydantic import TypeAdapter, EmailStr  # noqa: E402
+from pydantic import EmailStr, TypeAdapter  # noqa: E402
 from sqlalchemy import select, update  # noqa: E402
-from app.db import ControlSession  # noqa: E402
-from app.models import Workspace, User, AuthSession, AuditEvent  # noqa: E402
-from app.network_models import PartnerApiKey  # noqa: E402
-from app.config import get_settings  # noqa: E402
+
+from app.core.config import get_settings  # noqa: E402
+from app.core.database import ControlSession  # noqa: E402
+from app.persistence.models import (
+    AuditEvent,  # noqa: E402
+    AuthSession,
+    User,
+    Workspace,
+)
+from app.persistence.network_models import PartnerApiKey  # noqa: E402
 
 
 def grant_owner(email, company_slug=None, initial_only=False):
@@ -29,7 +35,7 @@ def grant_owner(email, company_slug=None, initial_only=False):
                 return existing.id
         account = db.scalar(select(User).where(User.email == email).with_for_update())
         if not account and get_settings().company_databases:
-            from app.tenancy import active_companies, company_sessions
+            from app.tenancy.service import active_companies, company_sessions
 
             matches = []
             for company in active_companies():

@@ -1,5 +1,10 @@
 """Real PostgreSQL isolation tests; generated databases are disposable test fixtures."""
 
+import hashlib
+import hmac
+import json
+import secrets
+import uuid
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -7,21 +12,18 @@ from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 from psycopg import sql
 from sqlalchemy import create_engine, select, text
-from sqlalchemy.pool import NullPool
 from sqlalchemy.engine import make_url
-import secrets
-import uuid
-import json
-import hmac
-import hashlib
+from sqlalchemy.pool import NullPool
+from test_api import client as company_client  # noqa: F401 -- shared fixture
+from test_api import signup_body
 
-from test_api import client as company_client, signup_body  # noqa: F401 -- shared fixture
-from app.config import get_settings
-from app.db import ControlSession, engine
+from app.core.config import get_settings
+from app.core.database import ControlSession, engine
+from app.core.security import passwords
 from app.main import app
-from app.models import Workspace, User, OutboxEvent
-from app.security import passwords
-from app.tenancy import Company, company_slug, company_sessions, for_each_company, company_context
+from app.persistence.models import OutboxEvent, User, Workspace
+from app.persistence.tenancy import Company
+from app.tenancy.service import company_context, company_sessions, company_slug, for_each_company
 
 
 @pytest.mark.parametrize(

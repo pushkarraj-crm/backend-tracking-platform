@@ -6,11 +6,11 @@ not keep the service awake or promise continuously available background delivery
 
 import json
 import os
-from pathlib import Path
 import signal
 import subprocess
 import sys
 import time
+from pathlib import Path
 from urllib.parse import urlsplit
 
 
@@ -35,7 +35,11 @@ def main():
     # The managed database is fresh for this preview. Existing data is preserved.
     subprocess.run([sys.executable, "-m", "alembic", "upgrade", "head"], check=True)
     subprocess.run(
-        [sys.executable, "-c", "from app.tenancy import migrate_companies; migrate_companies()"],
+        [
+            sys.executable,
+            "-c",
+            "from app.tenancy.service import migrate_companies; migrate_companies()",
+        ],
         check=True,
     )
     # Operator-only opt-in for free hosts without an interactive shell. No default owner.

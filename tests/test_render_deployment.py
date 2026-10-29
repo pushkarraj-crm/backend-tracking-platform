@@ -1,8 +1,10 @@
 import base64
 import secrets
+
 import pytest
 from pydantic import ValidationError
-from app.config import Settings
+
+from app.core.config import Settings
 from scripts.render_start import prepare_environment
 
 

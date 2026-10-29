@@ -1,8 +1,10 @@
 """Network extensions: financial idempotency, isolation and safe configuration."""
 
 from urllib.parse import parse_qs, urlsplit
+
 import pytest
-from test_api import client as api_client, register, sign_in  # noqa: F401
+from test_api import client as api_client  # noqa: F401
+from test_api import register
 from test_campaign_invoices import campaign_flow, partner
 
 
@@ -36,9 +38,9 @@ def postback(client, campaign, click, transaction="order1", **extra):
 
 
 def test_campaign_clone_is_paused_isolated_and_has_fresh_credentials(client):
-    from app.db import SessionLocal
-    from app.models import Offer
-    from app.security import key_hash
+    from app.core.database import SessionLocal
+    from app.core.security import key_hash
+    from app.persistence.models import Offer
 
     admin, adv, pub, advertiser, publisher, campaign, link, click = campaign_flow(client)
     original_event = goal(client, adv, campaign)
@@ -298,12 +300,14 @@ def test_employee_permissions_narrow_existing_role(client):
 
 
 def test_campaign_callbacks_override_global_and_test_is_not_payable(client, monkeypatch):
-    from app import callbacks
-    from app.db import SessionLocal
-    from app.models import WebhookEndpoint, OutboxEvent, CommissionEntry
-    from app.services import decrypt
-    from sqlalchemy import select
     import json
+
+    from sqlalchemy import select
+
+    from app.core.database import SessionLocal
+    from app.core.services import decrypt
+    from app.features.callbacks import router as callbacks
+    from app.persistence.models import CommissionEntry, OutboxEvent, WebhookEndpoint
 
     monkeypatch.setattr(callbacks, "validate_destination", lambda url: None)
     admin, adv, pub, advertiser, publisher, campaign, link, click = campaign_flow(client)
@@ -424,10 +428,11 @@ def test_smart_link_only_routes_approved_active_children(client):
 
 
 def test_automation_pauses_and_does_not_repeat(client):
-    from app.db import SessionLocal
-    from app.network_tools import run_automations
-    from app.network_models import AutomationLog
     from sqlalchemy import select
+
+    from app.core.database import SessionLocal
+    from app.features.tools.automation import run_automations
+    from app.persistence.network_models import AutomationLog
 
     admin, adv, pub, advertiser, publisher, campaign, link, click = campaign_flow(client)
     response = client.post(
@@ -488,8 +493,9 @@ def test_get_callback_signature_encodes_macros_and_pins_tls(monkeypatch):
     import hashlib
     import hmac
     from types import SimpleNamespace
-    from app import delivery
-    from app.config import get_settings
+
+    from app.core.config import get_settings
+    from app.features.callbacks import delivery as delivery
 
     monkeypatch.setattr(get_settings(), "outbound_allowed_hosts", ["publisher.example"])
     captured = {}
@@ -561,7 +567,8 @@ def test_get_callback_signature_encodes_macros_and_pins_tls(monkeypatch):
 def test_hourly_cap_distinguishes_repeated_dst_hours():
     from datetime import datetime, timezone
     from types import SimpleNamespace
-    from app.period_caps import bucket
+
+    from app.features.campaigns.caps import bucket
 
     cap = SimpleNamespace(timezone="America/New_York", period="hour")
     first = bucket(cap, datetime(2026, 11, 1, 5, 30, tzinfo=timezone.utc))
@@ -794,8 +801,8 @@ def test_postback_receipts_filter_by_campaign_and_keep_actor_scope(client):
 
 
 def test_mis_import_matches_reference_or_click_and_is_idempotent(client):
-    from app.db import SessionLocal
-    from app.models import Conversion
+    from app.core.database import SessionLocal
+    from app.persistence.models import Conversion
 
     admin, adv, pub, advertiser, publisher, campaign, link, click = campaign_flow(client)
     goal(client, adv, campaign, code="disbursed", name="Loan disbursed", payout="500")
@@ -867,8 +874,8 @@ def test_mis_import_matches_reference_or_click_and_is_idempotent(client):
 
 
 def test_global_postback_resolves_campaign_from_click_and_updates_status(client):
-    from app.db import SessionLocal
-    from app.models import Conversion
+    from app.core.database import SessionLocal
+    from app.persistence.models import Conversion
 
     admin, adv, pub, advertiser, publisher, campaign, link, click = campaign_flow(client)
     goal(client, adv, campaign, code="disbursed", name="Loan disbursed", payout="500")
@@ -914,8 +921,8 @@ def test_global_postback_resolves_campaign_from_click_and_updates_status(client)
 
 
 def test_link_forwards_personal_parameters_without_storing_them(client):
-    from app.db import SessionLocal
-    from app.models import Click
+    from app.core.database import SessionLocal
+    from app.persistence.models import Click
 
     admin, adv, pub, advertiser, publisher, campaign, link, click = campaign_flow(client)
     response = client.get(
@@ -973,8 +980,9 @@ def test_brand_account_is_its_own_advertiser(client):
 
 def test_targets_track_progress_without_blocking_and_include_agency_publishers(client):
     from datetime import date, timedelta
-    from app.db import SessionLocal
-    from app.models import User
+
+    from app.core.database import SessionLocal
+    from app.persistence.models import User
 
     admin, adv, pub, advertiser, publisher, campaign, link, click = campaign_flow(client)
     agency, _ = partner(client, admin, "affiliate", "agency")
@@ -1037,6 +1045,7 @@ def test_offer18_style_links_use_stable_public_numbers(client):
 
 def test_influencer_tracks_brand_deals_by_post_platform_and_manual_totals(client):
     from datetime import date
+
     from test_api import signup_body
 
     response = client.post(
@@ -1201,8 +1210,8 @@ def test_blocked_sources_reject_clicks_and_later_conversions_and_partners_see_wh
     assert late.status_code == 201 and late.json()["status"] == "rejected", late.text
     # Clicks recorded before referrer capture have no referrer field, so "no referrer"
     # must not retro-block them.
-    from app.db import SessionLocal
-    from app.models import Click
+    from app.core.database import SessionLocal
+    from app.persistence.models import Click
 
     plain = parse_qs(urlsplit(normal.headers["location"]).query)["click_id"][0]
     with SessionLocal() as db:

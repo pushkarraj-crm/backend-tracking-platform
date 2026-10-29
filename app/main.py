@@ -2,39 +2,23 @@ import logging
 import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
-from fastapi import FastAPI, Request, HTTPException
+
+from alembic.config import Config
+from alembic.script import ScriptDirectory
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
-from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
-from sqlalchemy import text
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from redis.asyncio import Redis
-from .config import get_settings
-from .db import engine
-from .middleware import SecurityMiddleware
-from .auth import router as auth_router
-from .routes import router as core_router
-from .portals import router as portals_router
-from .billing import router as billing_router
-from .payouts import router as payouts_router
-from .tracking import router as tracking_router
-from .domains import router as domains_router, DomainHostMiddleware
-from .reporting import router as reporting_router
-from .automated_payouts import router as automated_payouts_router
-from .tenancy import CompanyMiddleware
-from .campaigns import router as campaign_router
-from .invoices import router as invoice_router
-from .landing import router as landing_router
-from .network import router as network_router
-from .network_account import router as network_account_router
-from .web_tracking import router as web_tracking_router
-from .callbacks import router as callbacks_router
-from .platform_access import router as platform_access_router
-from .network_tools import router as network_tools_router
-from .influencer import router as influencer_router
-from .sources import router as sources_router
-from alembic.config import Config
-from alembic.script import ScriptDirectory
+from sqlalchemy import text
+
+from app.api.router import router
+from app.core.config import get_settings
+from app.core.database import engine
+from app.middleware.company import CompanyMiddleware
+from app.middleware.domains import DomainHostMiddleware
+from app.middleware.security import SecurityMiddleware
 
 settings = get_settings()
 schema_head = ScriptDirectory.from_config(
@@ -46,7 +30,7 @@ logging.basicConfig(level=logging.INFO, format="%(message)s")
 @asynccontextmanager
 async def lifespan(app):
     if settings.geoip_database_path:
-        from .tracking import geo_reader
+        from app.features.tracking.rules import geo_reader
 
         geo_reader()
     yield
@@ -72,26 +56,7 @@ app.add_middleware(
 app.add_middleware(DomainHostMiddleware)
 app.add_middleware(CompanyMiddleware)
 app.add_middleware(SecurityMiddleware)
-app.include_router(auth_router)
-app.include_router(core_router)
-app.include_router(portals_router)
-app.include_router(billing_router)
-app.include_router(payouts_router)
-app.include_router(tracking_router)
-app.include_router(domains_router)
-app.include_router(reporting_router)
-app.include_router(automated_payouts_router)
-app.include_router(campaign_router)
-app.include_router(invoice_router)
-app.include_router(landing_router)
-app.include_router(network_router)
-app.include_router(network_account_router)
-app.include_router(web_tracking_router)
-app.include_router(callbacks_router)
-app.include_router(platform_access_router)
-app.include_router(network_tools_router)
-app.include_router(influencer_router)
-app.include_router(sources_router)
+app.include_router(router)
 
 
 @app.exception_handler(RequestValidationError)
@@ -130,7 +95,7 @@ async def ready():
     try:
 
         def database_probe():
-            from .tenancy import company_context, company_sessions
+            from app.tenancy.service import company_context, company_sessions
 
             company = company_context.get()
             target = company_sessions(company).kw["bind"] if company else engine

@@ -9,14 +9,16 @@ import ssl
 import time
 from datetime import timedelta
 from email.message import EmailMessage
-from sqlalchemy import select, or_, and_
-from .config import get_settings
-from .db import SessionLocal
-from .models import OutboxEvent, WebhookEndpoint, Workspace, now, identifier
-from .services import decrypt, encrypt
-from .delivery import deliver_webhook
-from .billing import reconcile_subscription
-from .automated_payouts import process as process_payout
+
+from sqlalchemy import and_, or_, select
+
+from app.core.config import get_settings
+from app.core.database import SessionLocal
+from app.core.services import decrypt, encrypt
+from app.features.billing.automation import process as process_payout
+from app.features.billing.router import reconcile_subscription
+from app.features.callbacks.delivery import deliver_webhook
+from app.persistence.models import OutboxEvent, WebhookEndpoint, Workspace, identifier, now
 
 settings = get_settings()
 logger = logging.getLogger("affiliate.worker")
@@ -73,7 +75,7 @@ def dispatch(kind, encrypted_payload, event_id, workspace_id):
             endpoint = db.get(WebhookEndpoint, payload["endpoint_id"])
             if not endpoint or endpoint.workspace_id != workspace_id or not endpoint.active:
                 return
-            from .callbacks import stored_url
+            from app.features.callbacks.templates import stored_url
 
             return deliver_webhook(
                 stored_url(endpoint),
@@ -106,7 +108,7 @@ def run_once():
         http_status = dispatch(kind, payload, event_id, workspace_id)
     except Exception as exception:
         error = type(exception).__name__
-        from .delivery import WebhookResponseError
+        from app.features.callbacks.delivery import WebhookResponseError
 
         if isinstance(exception, WebhookResponseError):
             http_status = exception.status
@@ -149,7 +151,7 @@ def main():
     signal.signal(signal.SIGINT, stop)
     while not stopping:
         try:
-            from .tenancy import for_each_company
+            from app.tenancy.service import for_each_company
 
             if not for_each_company(run_once):
                 time.sleep(settings.worker_poll_seconds)

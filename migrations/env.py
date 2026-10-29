@@ -1,10 +1,11 @@
 from alembic import context
 from sqlalchemy import create_engine, pool
-from app.config import get_settings
-from app.db import Base
-from app import models  # noqa: F401 -- register every mapped table before schema comparison
-from app import tenancy  # noqa: F401 -- register control-plane directory tables
-from app import network_models  # noqa: F401 -- register network operations tables
+
+from app.core.config import get_settings
+from app.core.database import Base
+from app.persistence import models as models  # noqa: F401 -- register every mapped table before schema comparison
+from app.persistence import network_models as network_models  # noqa: F401 -- register network operations tables
+from app.persistence import tenancy as tenancy  # noqa: F401 -- register control-plane directory tables
 
 config = context.config
 target_metadata = Base.metadata

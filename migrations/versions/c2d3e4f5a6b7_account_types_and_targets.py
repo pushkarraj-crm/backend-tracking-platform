@@ -34,12 +34,8 @@ def upgrade():
         sa.Column("active", sa.Boolean(), nullable=False),
         sa.CheckConstraint("amount > 0", name="ck_campaign_target_amount"),
         sa.CheckConstraint("ends_on >= starts_on", name="ck_campaign_target_dates"),
-        sa.ForeignKeyConstraint(
-            ["workspace_id", "offer_id"], ["offers.workspace_id", "offers.id"]
-        ),
-        sa.ForeignKeyConstraint(
-            ["workspace_id", "partner_id"], ["users.workspace_id", "users.id"]
-        ),
+        sa.ForeignKeyConstraint(["workspace_id", "offer_id"], ["offers.workspace_id", "offers.id"]),
+        sa.ForeignKeyConstraint(["workspace_id", "partner_id"], ["users.workspace_id", "users.id"]),
         sa.ForeignKeyConstraint(["workspace_id"], ["workspaces.id"]),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("workspace_id", "id"),

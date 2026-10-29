@@ -4,11 +4,13 @@ import logging
 import signal
 import time
 from datetime import timedelta
-from sqlalchemy import select, delete
-from .db import SessionLocal
-from .models import Workspace, OutboxEvent, FraudCounter, now
-from .services import enqueue
-from .domains import revalidate_domains
+
+from sqlalchemy import delete, select
+
+from app.core.database import SessionLocal
+from app.core.services import enqueue
+from app.features.domains.router import revalidate_domains
+from app.persistence.models import FraudCounter, OutboxEvent, Workspace, now
 
 stopping = False
 logger = logging.getLogger("affiliate.maintenance")
@@ -46,7 +48,7 @@ def run_once():
                     {"subscription_id": workspace.razorpay_subscription_id},
                 )
             workspace.next_billing_check_at = now() + timedelta(minutes=15)
-        from .network_tools import run_automations
+        from app.features.tools.automation import run_automations
 
         run_automations(db)
         # Expired velocity buckets are operational state, not financial history.
@@ -65,7 +67,7 @@ def main():
     signal.signal(signal.SIGINT, stop)
     while not stopping:
         try:
-            from .tenancy import for_each_company
+            from app.tenancy.service import for_each_company
 
             for_each_company(run_once)
         except Exception as error:

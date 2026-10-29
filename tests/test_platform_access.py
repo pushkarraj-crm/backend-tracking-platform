@@ -1,11 +1,13 @@
 """Only platform owners may change network roles; old credentials lose access."""
 
 import pytest
-from test_api import client as api_client, register, sign_in  # noqa: F401
-from test_campaign_invoices import partner
-from app.db import SessionLocal
-from app.models import User, AuditEvent
 from sqlalchemy import select
+from test_api import client as api_client  # noqa: F401
+from test_api import register, sign_in
+from test_campaign_invoices import partner
+
+from app.core.database import SessionLocal
+from app.persistence.models import AuditEvent, User
 
 
 @pytest.fixture

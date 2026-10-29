@@ -2,6 +2,9 @@
 
 Backend for a multi-tenant affiliate marketing SaaS deployed on DigitalOcean. The frontend is a separate application. PostgreSQL stores business data; Redis provides shared rate limits; a durable PostgreSQL outbox processes email, billing reconciliation, and affiliate postbacks.
 
+See [backend architecture](docs/backend-architecture.md) for the feature packages,
+router registration, permissions, middleware and dependency boundaries.
+
 ## Local operation
 
 The local PostgreSQL instance is already initialized on `127.0.0.1:5433`. Credentials are in the ignored `.env`. On later sessions:

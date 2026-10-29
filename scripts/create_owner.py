@@ -2,15 +2,16 @@
 
 import getpass
 import sys
-from pathlib import Path
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from pydantic import EmailStr, TypeAdapter
 from sqlalchemy import select
-from pydantic import TypeAdapter, EmailStr
-from app.db import SessionLocal
-from app.models import Workspace, User
-from app.security import passwords
+
+from app.core.database import SessionLocal
+from app.core.security import passwords
+from app.persistence.models import User, Workspace
 
 
 def main():

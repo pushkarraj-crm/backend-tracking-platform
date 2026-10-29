@@ -3,6 +3,7 @@ import os
 import tempfile
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
+
 import pytest
 
 test_directory = tempfile.TemporaryDirectory()
@@ -17,12 +18,13 @@ os.environ["REQUIRE_EMAIL_VERIFICATION"] = "false"
 os.environ["METRICS_TOKEN"] = "test-metrics-token-" * 3
 
 from fastapi.testclient import TestClient
-from sqlalchemy import select, event, text
+from sqlalchemy import event, select, text
 from sqlalchemy.exc import IntegrityError
-from app.db import Base, engine, SessionLocal
+
+from app.core.database import Base, SessionLocal, engine
 from app.main import app
-from app.middleware import buckets
-from app.models import TrackingLink, User
+from app.middleware.security import buckets
+from app.persistence.models import TrackingLink, User
 
 # PostgreSQL runs in a unique schema, so no application tables are dropped.
 test_schema = None
@@ -357,8 +359,8 @@ def test_concurrent_postback_retries(client):
 
 def test_migration_roundtrip(client):
     from alembic import command
-    from alembic.config import Config
     from alembic.autogenerate import compare_metadata
+    from alembic.config import Config
     from alembic.migration import MigrationContext
     from sqlalchemy import inspect
 
@@ -377,7 +379,8 @@ def test_migration_roundtrip(client):
 
 def test_application_requires_postgres():
     from pydantic import ValidationError
-    from app.config import Settings
+
+    from app.core.config import Settings
 
     with pytest.raises(ValidationError):
         Settings(
@@ -504,10 +507,11 @@ def test_logout_invalidates_access_token(client):
 
 
 def test_email_verification_is_required(client, monkeypatch):
-    from app.config import get_settings
-    from app.models import OutboxEvent
-    from app.services import decrypt
     import json
+
+    from app.core.config import get_settings
+    from app.core.services import decrypt
+    from app.persistence.models import OutboxEvent
 
     monkeypatch.setattr(get_settings(), "require_email_verification", True)
     result = client.post(
@@ -534,10 +538,11 @@ def test_email_verification_is_required(client, monkeypatch):
 
 
 def test_password_reset_revokes_sessions_and_is_single_use(client):
-    from app.auth import issue_action
-    from app.models import OutboxEvent
-    from app.services import decrypt
     import json
+
+    from app.core.services import decrypt
+    from app.features.auth.router import issue_action
+    from app.persistence.models import OutboxEvent
 
     headers, admin = register(client)
     with SessionLocal.begin() as db:
@@ -553,7 +558,8 @@ def test_password_reset_revokes_sessions_and_is_single_use(client):
 
 def test_trial_expires_and_billing_remains_accessible(client):
     from datetime import datetime, timedelta, timezone
-    from app.models import Workspace
+
+    from app.persistence.models import Workspace
 
     headers, admin = register(client)
     with SessionLocal.begin() as db:
@@ -648,10 +654,11 @@ def test_body_limits_security_headers_and_api_metadata(client):
 
 
 def test_worker_retries_and_recovers_expired_lease(client, monkeypatch):
-    from app import worker
-    from app.models import OutboxEvent, now
-    from app.services import enqueue
     from datetime import timedelta
+
+    from app import worker
+    from app.core.services import enqueue
+    from app.persistence.models import OutboxEvent, now
 
     headers, admin = register(client)
     with SessionLocal.begin() as db:
@@ -677,10 +684,12 @@ def test_worker_retries_and_recovers_expired_lease(client, monkeypatch):
 
 
 def test_webhook_ssrf_rejected(monkeypatch):
-    from app.delivery import validate_destination
-    from app.config import get_settings
-    from fastapi import HTTPException
     import socket
+
+    from fastapi import HTTPException
+
+    from app.core.config import get_settings
+    from app.features.callbacks.delivery import validate_destination
 
     monkeypatch.setattr(get_settings(), "outbound_allowed_hosts", ["evil.example"])
     monkeypatch.setattr(
@@ -695,11 +704,12 @@ def test_webhook_ssrf_rejected(monkeypatch):
 
 
 def test_signed_billing_webhooks_are_deduplicated(client, monkeypatch):
-    import json
-    import hmac
     import hashlib
-    from app.config import get_settings
-    from app.models import Workspace, OutboxEvent
+    import hmac
+    import json
+
+    from app.core.config import get_settings
+    from app.persistence.models import OutboxEvent, Workspace
 
     headers, admin = register(client)
     monkeypatch.setattr(get_settings(), "razorpay_webhook_secret", "test-webhook-secret")
@@ -789,7 +799,7 @@ def test_signup_contact_fields_and_validation(client):
 
 
 def test_commission_reversals_and_retired_payouts(client):
-    from app.models import CommissionEntry
+    from app.persistence.models import CommissionEntry
 
     headers, admin = register(client)
     affiliate, offer, link, click_id = setup_offer(client, headers)
@@ -820,8 +830,9 @@ def test_commission_reversals_and_retired_payouts(client):
 
 
 def test_redis_outage_fails_closed_without_breaking_liveness(client, monkeypatch):
-    from app.middleware import SecurityMiddleware
     from redis.exceptions import RedisError
+
+    from app.middleware.security import SecurityMiddleware
 
     async def unavailable(*args):
         raise RedisError("sensitive connection details")
@@ -833,7 +844,7 @@ def test_redis_outage_fails_closed_without_breaking_liveness(client, monkeypatch
 
 
 def test_unhandled_errors_are_redacted(client, monkeypatch, caplog):
-    from app import routes
+    from app.features.partners import router as routes
 
     headers, admin = register(client)
 
@@ -880,10 +891,12 @@ def test_signup_rejects_stale_policy_version(client):
 )
 def test_redis_limits_are_shared_between_instances():
     import asyncio
-    import uuid
     import hashlib
-    from app.middleware import SecurityMiddleware
+    import uuid
+
     from redis.asyncio import Redis
+
+    from app.middleware.security import SecurityMiddleware
 
     async def exercise():
         identity = uuid.uuid4().hex
@@ -917,7 +930,7 @@ def test_email_password_login_without_workspace_or_mfa(client):
 
 
 def test_duplicate_email_is_rejected_across_workspaces(client):
-    from app.models import Workspace
+    from app.persistence.models import Workspace
 
     headers, admin = register(client)
     response = client.post(
@@ -929,7 +942,7 @@ def test_duplicate_email_is_rejected_across_workspaces(client):
 
 
 def test_targeting_schedule_and_untrusted_geo_headers(client, monkeypatch):
-    from app import tracking
+    from app.features.tracking import rules as tracking
 
     headers, admin = register(client)
     affiliate, offer, link, click_id = setup_offer(client, headers)
@@ -973,7 +986,8 @@ def test_targeting_schedule_and_untrusted_geo_headers(client, monkeypatch):
 
 def test_concurrent_click_cap_cannot_be_exceeded(client):
     from concurrent.futures import ThreadPoolExecutor
-    from app.models import OfferCounter
+
+    from app.persistence.models import OfferCounter
 
     headers, admin = register(client)
     affiliate, offer, link, click_id = setup_offer(client, headers)
@@ -1031,8 +1045,9 @@ def test_conversion_budget_and_duplicate_retry(client):
 
 
 def test_fraud_bot_and_conversion_timing(client):
-    from app.models import Click
     from datetime import datetime, timedelta, timezone
+
+    from app.persistence.models import Click
 
     headers, admin = register(client)
     affiliate, offer, link, click_id = setup_offer(client, headers)
@@ -1064,8 +1079,8 @@ def test_fraud_bot_and_conversion_timing(client):
 
 
 def test_custom_domain_verification_and_tenant_bound_host(client, monkeypatch):
-    from app import domains
-    from app.config import get_settings
+    from app.core.config import get_settings
+    from app.features.domains import router as domains
 
     headers, admin = register(client)
     affiliate, offer, link, click_id = setup_offer(client, headers)
@@ -1168,10 +1183,11 @@ def test_detailed_reports_exports_and_role_visibility(client):
 
 
 def test_billing_activation_renewal_grace_halt_resume_cancel(client, monkeypatch):
-    from app import billing
-    from app.config import get_settings
-    from app.models import Workspace
     from datetime import datetime, timedelta, timezone
+
+    from app.core.config import get_settings
+    from app.features.billing import router as billing
+    from app.persistence.models import Workspace
 
     headers, admin = register(client)
     monkeypatch.setattr(get_settings(), "razorpay_plans", {"starter": "plan_starter"})
@@ -1208,9 +1224,10 @@ def test_billing_activation_renewal_grace_halt_resume_cancel(client, monkeypatch
 
 
 def test_subscription_checkout_uses_fifteen_day_trial_and_existing_checkout(client, monkeypatch):
-    from app import billing
-    from app.config import get_settings
     from datetime import datetime, timezone
+
+    from app.core.config import get_settings
+    from app.features.billing import router as billing
 
     headers, admin = register(client)
     monkeypatch.setattr(get_settings(), "razorpay_plans", {"starter": "plan_starter"})
@@ -1239,9 +1256,9 @@ def test_subscription_checkout_uses_fifteen_day_trial_and_existing_checkout(clie
 
 
 def test_invoice_provider_query_is_scoped_to_subscription(client, monkeypatch):
-    from app import billing
-    from app.db import SessionLocal
-    from app.models import Workspace
+    from app.core.database import SessionLocal
+    from app.features.billing import router as billing
+    from app.persistence.models import Workspace
 
     headers, account = register(client)
     with SessionLocal() as db:
@@ -1261,8 +1278,8 @@ def test_invoice_provider_query_is_scoped_to_subscription(client, monkeypatch):
 
 
 def test_domain_certificate_gate_and_failed_dns_verification(client, monkeypatch):
-    from app.config import get_settings
-    from app import domains
+    from app.core.config import get_settings
+    from app.features.domains import router as domains
 
     headers, admin = register(client)
     monkeypatch.setattr(get_settings(), "tracking_cname", "tracking.example.com")

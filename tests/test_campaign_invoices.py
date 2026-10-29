@@ -1,8 +1,10 @@
 """Network-scoped campaigns, S2S attribution and direct payment lifecycle."""
 
-from urllib.parse import urlsplit, parse_qs
+from urllib.parse import parse_qs, urlsplit
+
 import pytest
-from test_api import client as api_client, register, sign_in  # noqa: F401
+from test_api import client as api_client  # noqa: F401
+from test_api import register, sign_in
 
 
 @pytest.fixture
@@ -215,10 +217,12 @@ def test_reject_invoice_releases_conversion_and_revoked_application_blocks_traff
 
 
 def test_retired_funding_never_calls_provider(client, monkeypatch):
-    from app import automated_payouts, maintenance
-    from app.db import SessionLocal
-    from app.models import Payout, PayoutRequest, OutboxEvent
     from sqlalchemy import select
+
+    from app import maintenance
+    from app.core.database import SessionLocal
+    from app.features.billing import automation as automated_payouts
+    from app.persistence.models import OutboxEvent, Payout, PayoutRequest
 
     admin, _ = register(client)
     for method, path in [
@@ -251,8 +255,8 @@ def test_retired_funding_never_calls_provider(client, monkeypatch):
 
 
 def test_advertiser_domains_and_escaped_crawlable_landing(client, monkeypatch):
-    from app import domains
-    from app.config import get_settings
+    from app.core.config import get_settings
+    from app.features.domains import router as domains
 
     monkeypatch.setattr(get_settings(), "tracking_cname", "gateway.example.com")
     monkeypatch.setattr(domains, "verify_dns", lambda domain: True)
@@ -332,12 +336,15 @@ def test_signed_publisher_s2s_event_contains_commission_and_is_durable(client, m
     import hashlib
     import hmac
     import json
-    from app import delivery, worker
     from types import SimpleNamespace
-    from app.config import get_settings
-    from app.db import SessionLocal
-    from app.models import OutboxEvent
+
     from sqlalchemy import select
+
+    from app import worker
+    from app.core.config import get_settings
+    from app.core.database import SessionLocal
+    from app.features.callbacks import delivery as delivery
+    from app.persistence.models import OutboxEvent
 
     admin, adv, pub, advertiser, publisher, campaign, link, click_id = campaign_flow(client)
     monkeypatch.setattr(get_settings(), "outbound_allowed_hosts", ["publisher.example"])

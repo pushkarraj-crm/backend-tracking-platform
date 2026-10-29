@@ -94,7 +94,7 @@ Render startup migrates the control database and every active tenant database
 before serving traffic. Other deployments should run Alembic upgrade head, then:
 
 ```shell
-python -c "from app.tenancy import migrate_companies; migrate_companies()"
+python -c "from app.tenancy.service import migrate_companies; migrate_companies()"
 ```
 
 The worker and maintenance loops visit each active company with a scoped session.
