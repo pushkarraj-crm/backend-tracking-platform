@@ -2,7 +2,7 @@ import hashlib
 import hmac
 import ipaddress
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from functools import lru_cache
 from typing import Literal
@@ -203,6 +203,26 @@ def context(request):
 
 
 def reject_fraud(db, offer, reason, score, ip_hash=None, click_id=None, publisher_id=None):
+    hour_ago = datetime.now(timezone.utc) - timedelta(hours=1)
+    # One alert per campaign per hour; the Fraud page has every event.
+    if not db.scalar(
+        select(FraudEvent.id)
+        .where(
+            FraudEvent.workspace_id == offer.workspace_id,
+            FraudEvent.offer_id == offer.id,
+            FraudEvent.created_at >= hour_ago,
+        )
+        .limit(1)
+    ):
+        from app.features.alerts.router import alert
+
+        alert(
+            db,
+            offer.workspace_id,
+            "fraud",
+            f"🚫 {offer.name}: traffic blocked ({reason.replace('_', ' ')}). "
+            "More blocks in the next hour are on the Fraud page.",
+        )
     db.add(
         FraudEvent(
             workspace_id=offer.workspace_id,

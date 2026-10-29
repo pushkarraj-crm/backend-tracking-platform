@@ -32,7 +32,7 @@ class CompanyMiddleware:
             slug = await run_in_threadpool(certificate_company)
         # Public S2S callbacks and tracking links have an explicit company prefix.
         match = re.fullmatch(
-            r"/c/([a-z0-9-]{1,63})(/c|/(?:t/|i/|capture/|s/|l/|postbacks/|pb/|wc/|billing/).*)",
+            r"/c/([a-z0-9-]{1,63})(/c|/pb|/(?:t/|i/|capture/|s/|l/|postbacks/|pb/|wc/|billing/).*)",
             path,
         )
         if match:

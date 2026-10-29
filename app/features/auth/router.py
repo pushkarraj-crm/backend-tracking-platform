@@ -11,7 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from app.core.config import get_settings
 from app.core.security import DB, Actor, dummy_hash, key_hash, passwords, token_for
 from app.core.services import audit, enqueue, utc
-from app.persistence.models import ActionToken, AuthSession, User, Workspace
+from app.persistence.models import ActionToken, AuthSession, TeamMember, User, Workspace
 from app.shared.schemas import Login, Register, StrictModel
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
@@ -61,7 +61,7 @@ def issue_action(db, user, purpose):
     )
 
 
-def mint(db, user, response, session=None):
+def mint(db, user, response, session=None, team_member=None):
     if session is None:
         from app.persistence.models import identifier
 
@@ -70,6 +70,7 @@ def mint(db, user, response, session=None):
             user_id=user.id,
             id=identifier(),
             expires_at=datetime.now(timezone.utc) + timedelta(days=settings.refresh_days),
+            team_member_id=team_member.id if team_member else None,
         )
         db.add(session)
     raw = session.id + "." + secrets.token_urlsafe(48)
@@ -94,6 +95,8 @@ def mint(db, user, response, session=None):
         max_age=settings.refresh_days * 86400,
     )
     db.flush()
+    if team_member is None and session.team_member_id:
+        team_member = db.get(TeamMember, session.team_member_id)
     return {
         "access_token": token_for(user, session.id),
         "csrf_token": csrf,
@@ -104,6 +107,10 @@ def mint(db, user, response, session=None):
             "email": user.email,
             "role": user.role,
             "parent_user_id": user.parent_user_id,
+            # A team member signs in to the owner's account; the app shows who they are.
+            "team_member": (
+                {"email": team_member.email, "name": team_member.full_name} if team_member else None
+            ),
         },
     }
 
@@ -148,6 +155,8 @@ def csrf_token(request: Request):
 def register(body: Register, db: DB, response: Response):
     if not settings.allow_registration:
         raise HTTPException(403, "Registration is closed")
+    if db.scalar(select(TeamMember.id).where(TeamMember.email == str(body.email).lower())):
+        raise HTTPException(409, "Email is already registered")
     if body.legal_version != settings.legal_version:
         raise HTTPException(
             422, "Policy version changed; reload the signup options and review the policies"
@@ -266,8 +275,14 @@ def registration_options():
 
 @router.post("/login")
 def login(body: Login, db: DB, response: Response):
-    user = db.scalar(select(User).where(User.email == str(body.email).lower()))
-    valid = passwords.verify(body.password, user.password_hash if user else dummy_hash)
+    email = str(body.email).lower()
+    user = db.scalar(select(User).where(User.email == email))
+    member = None if user else db.scalar(select(TeamMember).where(TeamMember.email == email))
+    hashed = user.password_hash if user else member.password_hash if member else dummy_hash
+    valid = passwords.verify(body.password, hashed)
+    if member:
+        # A team member signs in to the account that owns the team.
+        user = db.get(User, member.owner_id) if member.active else None
     if not valid or not user or not user.active:
         raise HTTPException(401, "Invalid credentials")
     workspace = db.get(Workspace, user.workspace_id)
@@ -275,7 +290,10 @@ def login(body: Login, db: DB, response: Response):
         raise HTTPException(403, "Workspace is suspended")
     if settings.require_email_verification and not user.email_verified:
         raise HTTPException(403, "Verify your email before login")
-    result = mint(db, user, response)
+    result = mint(db, user, response, team_member=member)
+    if member:
+        member.last_login_at = datetime.now(timezone.utc)
+        user.acting_label = "team member " + member.email
     audit(db, user, "auth.login", user.id)
     db.commit()
     return result
@@ -295,6 +313,8 @@ def refresh(request: Request, response: Response, db: DB):
         raise HTTPException(401, "Refresh token reuse detected; session revoked")
     user = db.get(User, session.user_id)
     if not user.active or not db.get(Workspace, user.workspace_id).active:
+        raise HTTPException(401, "Account unavailable")
+    if session.team_member_id and not db.get(TeamMember, session.team_member_id).active:
         raise HTTPException(401, "Account unavailable")
     if user.parent_user_id and not db.get(User, user.parent_user_id).active:
         raise HTTPException(401, "Parent affiliate unavailable")
@@ -320,7 +340,10 @@ def logout(request: Request, response: Response, db: DB):
 
 
 @router.post("/logout-all", status_code=204)
-def logout_all(db: DB, user: Actor):
+def logout_all(request: Request, db: DB, user: Actor):
+    from app.features.accounts.router import session_only
+
+    session_only(request)
     user.auth_version += 1
     db.execute(update(AuthSession).where(AuthSession.user_id == user.id).values(revoked=True))
     audit(db, user, "auth.logout_all", user.id)

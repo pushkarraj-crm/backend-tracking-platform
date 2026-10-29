@@ -113,21 +113,24 @@ def fallback_campaign_link(db, offer, link, request):
 
     from app.features.campaigns.policy import policy
     from app.features.domains.router import link_base
+    from app.features.tracking.runtime import resolve_link
 
     target_id = policy(offer).fallback_campaign_id
     if not target_id or target_id == offer.id or request.query_params.get("relay_fallback"):
         return None
     backup = db.scalar(
-        select(TrackingLink)
-        .join(Offer, Offer.id == TrackingLink.offer_id)
-        .where(
+        select(TrackingLink).where(
             TrackingLink.workspace_id == offer.workspace_id,
             TrackingLink.offer_id == target_id,
             TrackingLink.affiliate_id == link.affiliate_id,
-            Offer.active.is_(True),
         )
     )
     if not backup:
+        return None
+    try:
+        # Only hop when the backup would serve the partner (active, approved, advertiser live).
+        resolve_link(db, backup.id)
+    except HTTPException:
         return None
     query = urlencode([*request.query_params.multi_items(), ("relay_fallback", "1")])
     base = link_base(db, SimpleNamespace(workspace_id=offer.workspace_id), None)

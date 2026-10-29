@@ -74,6 +74,11 @@ def quota(db, user, model, resource):
 
 
 def audit(db, user, action, resource_id, detail=""):
+    acting = getattr(user, "acting_label", None)
+    if acting:
+        # Signed in through "log in as" or a team login: record who really did it.
+        suffix = f" [by {acting}]"
+        detail = (detail[: max(0, 200 - len(suffix))] + suffix)[:200]
     db.add(
         AuditEvent(
             workspace_id=user.workspace_id,

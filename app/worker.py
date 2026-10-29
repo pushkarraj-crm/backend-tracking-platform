@@ -84,6 +84,14 @@ def dispatch(kind, encrypted_payload, event_id, workspace_id):
                 payload["event"],
                 method=endpoint.method,
             )
+    elif kind == "alert":
+        from app.features.alerts.router import channels, send, stored
+
+        with SessionLocal() as db:
+            alert_settings = stored(db.get(Workspace, workspace_id))
+        # The channel may have been removed since the alert was queued.
+        if payload["channel"] in channels(alert_settings):
+            send(payload["channel"], alert_settings, payload["text"])
     elif kind == "billing":
         with SessionLocal.begin() as db:
             workspace = db.scalar(

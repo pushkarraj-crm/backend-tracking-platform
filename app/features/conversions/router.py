@@ -100,20 +100,46 @@ def accept_postback(db, offer, body, request, status=None, offline=False, browse
             429: "cap_reached",
             402: "subscription_required",
         }.get(error.status_code, "rejected")
+        failed_alert(db, offer_id, workspace_id, reason, error.status_code)
         receipt(reason, error.status_code)
         db.commit()
         raise
     return JSONResponse(result, status_code=200) if duplicate else result
 
 
-GLOBAL_EVENTS = {"", "initial", "lead", "sale", "conversion"}
+def failed_alert(db, offer_id, workspace_id, reason, status):
+    """Alert on a refused postback, at most once per campaign per hour."""
+    from datetime import datetime, timedelta, timezone
+
+    from app.features.alerts.router import alert
+    from app.persistence.network_models import PostbackReceipt
+
+    hour_ago = datetime.now(timezone.utc) - timedelta(hours=1)
+    if db.scalar(
+        select(PostbackReceipt.id)
+        .where(
+            PostbackReceipt.workspace_id == workspace_id,
+            PostbackReceipt.offer_id == offer_id,
+            PostbackReceipt.http_status >= 400,
+            PostbackReceipt.created_at >= hour_ago,
+        )
+        .limit(1)
+    ):
+        return
+    alert(
+        db,
+        workspace_id,
+        "postback_errors",
+        f"❗ {db.get(Offer, offer_id).name}: a postback was refused "
+        f"({reason.replace('_', ' ')}, HTTP {status}). Details are under Postback receipts.",
+    )
 
 
-@router.api_route("/pb/{token}", methods=["GET", "POST"], status_code=201)
-async def global_postback(token: str, request: Request, db: DB):
-    """One postback URL per account; the click identifies the campaign."""
-    from starlette.concurrency import run_in_threadpool
+# Names that mean the campaign's main conversion; app installs count as one.
+GLOBAL_EVENTS = {"", "initial", "lead", "sale", "conversion", "install"}
 
+
+async def postback_values(request):
     values = dict(request.query_params)
     if request.method == "POST":
         try:
@@ -127,7 +153,28 @@ async def global_postback(token: str, request: Request, db: DB):
         if not isinstance(data, dict):
             raise HTTPException(422, "Postback body must be an object")
         values.update(data)
-    values = {str(k).lower(): str(v).strip() for k, v in values.items() if v is not None}
+    return {str(k).lower(): str(v).strip() for k, v in values.items() if v is not None}
+
+
+@router.api_route("/pb/{token}", methods=["GET", "POST"], status_code=201)
+async def global_postback(token: str, request: Request, db: DB):
+    """One postback URL per account; the click identifies the campaign."""
+    from starlette.concurrency import run_in_threadpool
+
+    values = await postback_values(request)
+    return await run_in_threadpool(receive_global_postback, db, token, values, request)
+
+
+@router.api_route("/pb", methods=["GET", "POST"], status_code=201)
+async def global_postback_by_parameter(request: Request, db: DB):
+    """The same postback with the account token as a parameter. Attribution platforms
+    (AppsFlyer, Adjust, Branch) keep one URL template for every Relay account and fill in
+    each advertiser's token."""
+    from starlette.concurrency import run_in_threadpool
+
+    values = await postback_values(request)
+    token = values.pop("token", "") or values.pop("security_token", "")
+    values.pop("security_token", None)
     return await run_in_threadpool(receive_global_postback, db, token, values, request)
 
 
@@ -146,6 +193,7 @@ def record_values(db, workspace, values, request, browser=False):
     """Shared by the server postback and the browser endpoint: click or coupon, then ingest."""
     from pydantic import ValidationError
 
+    from app.features.conversions.service import revenue_share
     from app.features.coupons.router import coupon_click, usable_coupon
     from app.persistence.network_models import CampaignEvent
 
@@ -184,15 +232,25 @@ def record_values(db, workspace, values, request, browser=False):
     offer = db.get(Offer, db.get(TrackingLink, click.link_id).offer_id)
     model = offer.campaign_model
     if event_key != "initial":
-        model = db.scalar(
-            select(CampaignEvent.model).where(
-                CampaignEvent.workspace_id == offer.workspace_id,
-                CampaignEvent.offer_id == offer.id,
-                CampaignEvent.code == event_key,
-            )
+        # AppsFlyer names events "af_purchase"; a stage coded "purchase" matches it when
+        # the campaign has no stage with the exact name.
+        codes = [event_key, *([event_key[3:]] if event_key.startswith("af_") else [])]
+        stages = dict(
+            db.execute(
+                select(CampaignEvent.code, CampaignEvent.model).where(
+                    CampaignEvent.workspace_id == offer.workspace_id,
+                    CampaignEvent.offer_id == offer.id,
+                    CampaignEvent.code.in_(codes),
+                )
+            ).all()
         )
+        event_key = next((c for c in codes if c in stages), event_key)
+        model = stages.get(event_key)
     # Other platforms often send an amount on every event; it only prices CPS events.
     amount = values.get("amount") if model == "CPS" else None
+    if event_key == "initial" and revenue_share(offer):
+        # Revenue share is priced on the advertiser's commission, sent as payout.
+        amount = values.get("payout")
     # Browsers cannot set a status; their sales stay pending until confirmed.
     status = None if browser else values.get("status", "").lower() or None
     if status not in {None, "approved", "rejected", "pending"}:

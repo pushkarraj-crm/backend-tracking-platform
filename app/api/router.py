@@ -26,6 +26,8 @@ from app.features.stores.router import router as stores_router
 from app.features.tools.automation import router as automation_router
 from app.features.tools.router import router as network_tools_router
 from app.features.tools.smart_links import router as smart_links_router
+from app.features.alerts.router import router as alerts_router
+from app.features.teams.router import router as teams_router
 from app.features.tracking.landing import router as landing_router
 from app.features.tracking.links import router as links_router
 from app.features.tracking.rules import router as tracking_router
@@ -60,3 +62,5 @@ router.include_router(influencer_router)
 router.include_router(sources_router)
 router.include_router(coupons_router)
 router.include_router(stores_router)
+router.include_router(alerts_router)
+router.include_router(teams_router)

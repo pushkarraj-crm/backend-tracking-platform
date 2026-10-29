@@ -129,11 +129,39 @@ each a separate project to schedule after the list above unless the owner reorde
    pending, campaign paused, admins notified). Setting `fallback_campaign_id` sends clicks
    the campaign cannot take (targeting, schedule, click cap) to the same partner's link on
    that campaign, once (`relay_fallback=1` stops loops); otherwise `fallback_url` applies.
-10. Revenue-share model: commission derived from the advertiser's reported payout.
-11. Telegram and Slack alerts for caps, postback errors and fraud.
-12. Login as partner, agency team logins and account managers.
+10. Revenue-share model: commission derived from the advertiser's reported payout. — done
+    2026-10-29. A CPS campaign setting `percent_of` = "commission": the global postback's
+    `payout` (the advertiser's commission) becomes revenue and the partner gets the
+    campaign's percentage of it; `amount` is ignored. Campaign-level pricing only — funnel
+    stages and commission rules still price on the order value.
+11. Telegram and Slack alerts for caps, postback errors and fraud. — done 2026-10-29.
+    Settings → Alerts (account admins): a Slack incoming webhook and/or a Telegram bot token
+    and chat, stored encrypted in `Workspace.alert_settings` (migration `c8d9e0f1a2b3`), plus
+    which events to send. Alerts are queued in the outbox (kind `alert`) and sent by the
+    worker, only to hooks.slack.com or api.telegram.org. Cap alerts: period-cap threshold and
+    a campaign paused at its conversion cap. Fraud and refused-postback alerts are limited to
+    one per campaign per hour. "Send test" posts immediately and never echoes provider errors
+    (a Telegram URL contains the bot token).
+12. Login as partner, agency team logins and account managers. — done 2026-10-30
+    (migration `d9e0f1a2b3c4`). Both "log in as" and team logins are an `AuthSession` for the
+    account plus who really acts (`acted_by` / `team_member_id`); audit details get
+    "[by admin …]" / "[by team member …]", and `session_only` blocks API keys, permissions,
+    integrations, sign-out-all and team management in such sessions.
+    - Log in as: account admins only, partner accounts only, 60 minutes, no refresh cookie;
+      the app keeps the admin's session in memory with a "Return to my account" banner.
+    - Teams: any partner account adds up to 25 members (`team_members`, own email and
+      password); a member signs in on the normal login page into the owner's account.
+      Owners remove access or set a new password (both end the member's sessions).
+      Shortcut: members cannot reset their own password by email; the owner sets it.
+    - Account managers: admins assign an admin/staff member to a partner (`users.manager_id`);
+      partners see the manager on their Overview; `/managed-partners` lists a manager's book.
 13. AppsFlyer integrated-partner registration (business step) before building
-    fintech-app attribution.
+    fintech-app attribution. — Groundwork done 2026-10-30, no partner ID yet:
+    `/pb?token=…` (also `security_token`, GET or POST) accepts the account secret as a
+    parameter so an attribution platform keeps one URL template for all Relay accounts;
+    `event=install` is the main conversion; `af_`-prefixed event names fall back to the
+    stage without the prefix (exact codes win). Waiting on the partner ID: AppsFlyer
+    attribution link builder (`pid`), click signing, rejected-install postbacks.
 
 ## 6. Project 1 — Global postback and link parameters
 

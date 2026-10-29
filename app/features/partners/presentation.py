@@ -9,4 +9,5 @@ def output_user(user):
         "name": user.full_name,
         "api_enabled": user.api_enabled,
         "staff_permissions": user.staff_permissions,
+        "manager_id": user.manager_id,
     }

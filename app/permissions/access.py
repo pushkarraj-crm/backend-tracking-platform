@@ -111,7 +111,7 @@ def employee_permission(user, request):
         ("/campaigns", "/offers", "/links", "/coupons/")
     ):
         permission = "campaigns:read" if read else "campaigns:write"
-    elif path.startswith("/users"):
+    elif path.startswith("/users") or path == "/managed-partners":
         permission = "partners:read" if read else "partners:write"
     elif path.startswith(("/reports/", "/report-templates")):
         permission = "reports:read"

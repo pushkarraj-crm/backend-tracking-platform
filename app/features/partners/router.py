@@ -49,6 +49,10 @@ def create_user(body: UserCreate, db: DB, user: Actor):
     elif parent_id:
         raise HTTPException(400, "Only publishers can have a parent")
     quota(db, user, User, "users")
+    from app.persistence.models import TeamMember
+
+    if db.scalar(select(TeamMember.id).where(TeamMember.email == str(body.email).lower())):
+        raise HTTPException(409, "Email is already registered")
     member = User(
         workspace_id=user.workspace_id,
         email=str(body.email).lower(),

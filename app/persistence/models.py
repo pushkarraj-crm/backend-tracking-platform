@@ -60,6 +60,8 @@ class Workspace(Base):
     postback_token: Mapped[str | None] = mapped_column(Text)
     # Public key for browser sale tracking on stores; not a secret, unlike the postback token.
     web_key: Mapped[str | None] = mapped_column(String(32), unique=True)
+    # Encrypted JSON: Slack webhook, Telegram bot token and chat, and which alerts to send.
+    alert_settings: Mapped[str | None] = mapped_column(Text)
     usage_types: Mapped[list[str]] = mapped_column(JSON, default=list, server_default="[]")
     country: Mapped[str | None] = mapped_column(String(2))
     mobile: Mapped[str | None] = mapped_column(String(20))
@@ -96,6 +98,26 @@ class User(Base):
     consent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     api_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     staff_permissions: Mapped[list | None] = mapped_column(JSON)
+    # The admin or staff member who looks after this partner (account manager).
+    manager_id: Mapped[str | None] = mapped_column(String(32), index=True)
+
+
+class TeamMember(Base):
+    """A person who signs in to a partner's (agency's) account with their own login."""
+
+    __tablename__ = "team_members"
+    __table_args__ = (
+        ForeignKeyConstraint(["workspace_id", "owner_id"], ["users.workspace_id", "users.id"]),
+    )
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=identifier)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"))
+    owner_id: Mapped[str] = mapped_column(String(32), index=True)
+    email: Mapped[str] = mapped_column(String(254), unique=True)
+    full_name: Mapped[str | None] = mapped_column(String(120))
+    password_hash: Mapped[str] = mapped_column(String(256))
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Offer(Base):
@@ -229,6 +251,10 @@ class AuthSession(Base):
     revoked: Mapped[bool] = mapped_column(Boolean, default=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    # Set when someone other than the user is signed in: an admin's "log in as"…
+    acted_by: Mapped[str | None] = mapped_column(String(32))
+    # …or a member of the user's team.
+    team_member_id: Mapped[str | None] = mapped_column(String(32))
 
 
 class ActionToken(Base):

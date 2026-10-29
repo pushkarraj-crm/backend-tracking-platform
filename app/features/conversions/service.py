@@ -21,6 +21,15 @@ from app.persistence.models import (
 from app.persistence.network_models import CampaignEvent, CommissionRule, TrafficRule
 
 
+def revenue_share(offer, source="campaign"):
+    """CPS priced on the commission the advertiser reports rather than the order value."""
+    return (
+        source == "campaign"
+        and offer.campaign_model == "CPS"
+        and policy(offer).percent_of == "commission"
+    )
+
+
 def same_payload(existing, body):
     return (
         existing.click_id == body.click_id
@@ -133,7 +142,9 @@ def ingest(db, offer, body, offline=False, browser=False):
         payout = (body.sale_amount * pricing.sale_percentage / Decimal(100)).quantize(
             Decimal("0.0001"), rounding=ROUND_DOWN
         )
-        revenue = payout
+        # Revenue share: sale_amount is the advertiser's reported commission, all of it ours.
+        # shortcut: campaign-level pricing only; events and commission rules stay % of sale.
+        revenue = body.sale_amount if revenue_share(offer, source) else payout
     elif model == "CPL" and (body.event_type not in {None, "lead"} or body.sale_amount is not None):
         raise HTTPException(422, "CPL campaigns accept lead events only")
     state = (
@@ -199,6 +210,14 @@ def ingest(db, offer, body, offline=False, browser=False):
                 f"{offer.name} paused: conversion cap reached",
                 "New traffic is stopped. Raise the cap and resume the campaign to continue.",
                 offer.id,
+            )
+            from app.features.alerts.router import alert
+
+            alert(
+                db,
+                offer.workspace_id,
+                "caps",
+                f"⛔ {offer.name} is paused: its conversion cap is full. Raise the cap and resume it.",
             )
     else:
         reserve(db, offer, "conversions", at, revenue=revenue)

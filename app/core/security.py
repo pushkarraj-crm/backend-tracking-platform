@@ -48,7 +48,7 @@ def key_hash(value: str):
     return hashlib.sha256(value.encode()).hexdigest()
 
 
-def token_for(user: User, session_id: str):
+def token_for(user: User, session_id: str, minutes: int | None = None):
     from app.tenancy.service import company_context
 
     company = company_context.get()
@@ -62,7 +62,7 @@ def token_for(user: User, session_id: str):
             "sid": session_id,
             "ver": user.auth_version,
             "iat": now,
-            "exp": now + timedelta(minutes=settings.token_minutes),
+            "exp": now + timedelta(minutes=minutes or settings.token_minutes),
             "iss": "affiliate-platform",
             "aud": "affiliate-api",
         },
@@ -122,6 +122,21 @@ def current_user(
         or utc(session.expires_at) <= datetime.now(timezone.utc)
     ):
         raise error
+    if session.team_member_id:
+        from app.persistence.models import TeamMember
+
+        member = db.get(TeamMember, session.team_member_id)
+        if not member or not member.active or member.owner_id != user.id:
+            raise error
+        user.acting_label = "team member " + member.email
+    elif session.acted_by:
+        admin = db.get(User, session.acted_by)
+        if not admin or not admin.active or admin.workspace_id != user.workspace_id:
+            raise error
+        user.acting_label = "admin " + admin.email
+    # Who is really acting, for audit and for blocking account-security actions.
+    request.state.acted_by = session.acted_by
+    request.state.team_member_id = session.team_member_id
     return authorized_account(db, user, request)
 
 

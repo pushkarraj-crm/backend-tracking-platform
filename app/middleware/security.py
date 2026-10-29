@@ -119,7 +119,7 @@ class SecurityMiddleware:
                     "auth"
                     if path.startswith("/auth/")
                     else "tracking"
-                    if path == "/c"
+                    if path in {"/c", "/pb"}
                     or path.startswith(
                         (
                             "/t/",

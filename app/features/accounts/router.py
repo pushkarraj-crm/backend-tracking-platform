@@ -31,6 +31,8 @@ router = APIRouter(tags=["Network accounts and integrations"])
 def session_only(request):
     if getattr(request.state, "api_key_id", None):
         raise HTTPException(403, "Use an interactive login session")
+    if getattr(request.state, "acted_by", None) or getattr(request.state, "team_member_id", None):
+        raise HTTPException(403, "Only the account owner can do this")
 
 
 class ApiKeyBody(StrictModel):

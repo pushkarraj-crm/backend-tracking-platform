@@ -979,7 +979,7 @@ def test_brand_account_is_its_own_advertiser(client):
 
 
 def test_targets_track_progress_without_blocking_and_include_agency_publishers(client):
-    from datetime import date, timedelta
+    from datetime import datetime, timedelta, timezone
 
     from app.core.database import SessionLocal
     from app.persistence.models import User
@@ -989,7 +989,7 @@ def test_targets_track_progress_without_blocking_and_include_agency_publishers(c
     with SessionLocal() as db:
         db.get(User, publisher["id"]).parent_user_id = agency["id"]
         db.commit()
-    today = date.today()
+    today = datetime.now(timezone.utc).date()  # the server counts days in UTC
     window = {
         "starts_on": str(today - timedelta(days=4)),
         "ends_on": str(today + timedelta(days=5)),
@@ -1044,7 +1044,7 @@ def test_offer18_style_links_use_stable_public_numbers(client):
 
 
 def test_influencer_tracks_brand_deals_by_post_platform_and_manual_totals(client):
-    from datetime import date
+    from datetime import datetime, timezone
 
     from test_api import signup_body
 
@@ -1103,8 +1103,8 @@ def test_influencer_tracks_brand_deals_by_post_platform_and_manual_totals(client
         headers=me,
         json={
             "campaign_id": deal.json()["id"],
-            "period_start": str(date.today()),
-            "period_end": str(date.today()),
+            "period_start": str(datetime.now(timezone.utc).date()),
+            "period_end": str(datetime.now(timezone.utc).date()),
             "sales": 3,
             "earnings": "180",
             "note": "Brand email, coupon PRIYA10",
@@ -1474,3 +1474,380 @@ def test_unservable_clicks_fall_back_to_the_partners_link_on_another_campaign_on
     assert landed.status_code == 302 and landed.headers["location"].startswith(
         "https://brand.example/backup"
     )
+    # No hop to a backup the partner is no longer approved on.
+    client.patch(
+        f"/campaign-applications/{application.json()['id']}",
+        headers=adv,
+        json={"status": "rejected"},
+    )
+    assert client.get("/t/" + link["id"], follow_redirects=False).status_code == 403
+
+
+def test_revenue_share_pays_the_partner_a_percentage_of_the_reported_commission(client):
+    admin, adv, pub, advertiser, publisher, campaign, link, click = campaign_flow(client)
+    deal = client.post(
+        "/campaigns",
+        headers=adv,
+        json={
+            "name": "Card signups (rev share)",
+            "destination_url": "https://bank.example/card",
+            "campaign_model": "CPS",
+            "sale_percentage": "70",
+            "revenue": "0",
+            "payout": "0",
+            "settings": {"percent_of": "commission", "initial_repeatable": True},
+        },
+    )
+    assert deal.status_code == 201, deal.text
+    deal = deal.json()
+    application = client.post(f"/campaigns/{deal['id']}/apply", headers=pub, json={}).json()
+    client.patch(
+        f"/campaign-applications/{application['id']}", headers=adv, json={"status": "approved"}
+    )
+    deal_link = client.post(f"/campaigns/{deal['id']}/link", headers=pub).json()
+    hop = client.get("/t/" + deal_link["id"], follow_redirects=False)
+    deal_click = parse_qs(urlsplit(hop.headers["location"]).query)["click_id"][0]
+    pb = client.get("/postback-settings", headers=admin).json()["url"]
+    pb = "/pb/" + pb.rsplit("/pb/", 1)[1]
+    # The advertiser reports its commission as payout; the order amount is ignored.
+    sale = client.get(
+        pb, params={"click_id": deal_click, "txn_id": "CARD1", "payout": "1000", "amount": "99999"}
+    )
+    assert sale.status_code == 201, sale.text
+    row = next(
+        r for r in client.get("/conversions", headers=admin).json() if r["id"] == sale.json()["id"]
+    )
+    assert (row["revenue"], row["payout"]) == ("1000.0000", "700.0000")
+    assert "revenue" not in client.get("/conversions", headers=pub).json()[0]
+    missing = client.get(pb, params={"click_id": deal_click, "txn_id": "CARD2", "amount": "500"})
+    assert missing.status_code == 422
+    # Ordinary CPS keeps paying a percentage of the order value.
+    profile = client.get(f"/campaigns/{deal['id']}/profile", headers=adv).json()
+    client.put(
+        f"/campaigns/{deal['id']}/profile",
+        headers=adv,
+        json={
+            "name": profile["name"],
+            "destination_url": profile["destination_url"],
+            "settings": {**profile["settings"], "percent_of": "sale"},
+        },
+    )
+    order = client.get(pb, params={"click_id": deal_click, "txn_id": "CARD3", "amount": "500"})
+    assert order.status_code == 201, order.text
+    row = next(
+        r for r in client.get("/conversions", headers=admin).json() if r["id"] == order.json()["id"]
+    )
+    assert (row["revenue"], row["payout"]) == ("350.0000", "350.0000")
+
+
+def _queued_alerts():
+    import json
+
+    from sqlalchemy import select
+
+    from app.core.database import SessionLocal
+    from app.core.services import decrypt
+    from app.persistence.models import OutboxEvent
+
+    with SessionLocal() as db:
+        return [
+            json.loads(decrypt(e.payload))
+            for e in db.scalars(select(OutboxEvent).where(OutboxEvent.kind == "alert"))
+        ]
+
+
+SLACK_HOOK = "https://hooks.slack.com/services/T000/B000/abcdefghijklmnopqrstuvwx"
+BOT_TOKEN = "123456789:AAAbbbCCCdddEEEfffGGGhhhIIIjjjKKKl"
+
+
+def test_alert_settings_keep_secrets_and_test_messages_never_leak_them(client, monkeypatch):
+    from app.features.alerts import router as alerts
+
+    admin, adv, pub, advertiser, publisher, campaign, link, click = campaign_flow(client)
+    assert client.get("/alert-settings", headers=pub).status_code == 403
+    assert client.get("/alert-settings", headers=admin).json() == {
+        "slack": False,
+        "telegram": False,
+        "telegram_chat_id": "",
+        "events": ["caps", "postback_errors", "fraud"],
+    }
+    bad = client.put(
+        "/alert-settings", headers=admin, json={"slack_webhook_url": "https://evil.example/x"}
+    )
+    assert bad.status_code == 422
+    assert (
+        client.put(
+            "/alert-settings", headers=admin, json={"telegram_bot_token": "nope"}
+        ).status_code
+        == 422
+    )
+    saved = client.put(
+        "/alert-settings",
+        headers=admin,
+        json={
+            "slack_webhook_url": SLACK_HOOK,
+            "telegram_bot_token": BOT_TOKEN,
+            "telegram_chat_id": "-1001234",
+        },
+    )
+    assert saved.status_code == 200, saved.text
+    assert SLACK_HOOK not in saved.text and BOT_TOKEN not in saved.text
+    assert saved.json()["slack"] and saved.json()["telegram"]
+    # Omitted fields are kept; "" removes one.
+    kept = client.put("/alert-settings", headers=admin, json={"events": ["fraud"]}).json()
+    assert kept["slack"] and kept["telegram"] and kept["events"] == ["fraud"]
+    sent = []
+    monkeypatch.setattr(
+        alerts, "send", lambda channel, settings, text: sent.append((channel, text))
+    )
+    assert client.post(
+        "/alert-settings/test", headers=admin, json={"channel": "telegram"}
+    ).json() == {"sent": True}
+    assert sent[0][0] == "telegram" and "Test alert" in sent[0][1]
+
+    def broken(channel, settings, text):
+        raise RuntimeError(f"failed for https://api.telegram.org/bot{BOT_TOKEN}/sendMessage")
+
+    monkeypatch.setattr(alerts, "send", broken)
+    failed = client.post("/alert-settings/test", headers=admin, json={"channel": "telegram"})
+    assert failed.status_code == 502 and BOT_TOKEN not in failed.text
+    removed = client.put("/alert-settings", headers=admin, json={"slack_webhook_url": ""}).json()
+    assert removed["slack"] is False
+    assert (
+        client.post("/alert-settings/test", headers=admin, json={"channel": "slack"}).status_code
+        == 409
+    )
+
+
+def test_fraud_and_postback_errors_alert_once_per_campaign_per_hour(client, monkeypatch):
+    from app.features.alerts import router as alerts
+
+    admin, adv, pub, advertiser, publisher, campaign, link, click = campaign_flow(client)
+    client.put("/alert-settings", headers=admin, json={"slack_webhook_url": SLACK_HOOK})
+    rules = client.get(f"/offers/{campaign['id']}/rules", headers=adv).json()
+    client.put(
+        f"/offers/{campaign['id']}/rules",
+        headers=adv,
+        json={**rules, "minimum_conversion_seconds": 3600},
+    )
+    # Too-fast conversions are fraud and also refused postbacks: one alert of each kind.
+    assert postback(client, campaign, click, "FAST1").status_code == 403
+    assert postback(client, campaign, click, "FAST2").status_code == 403
+    texts = [a["text"] for a in _queued_alerts()]
+    assert len(texts) == 2 and all(a["channel"] == "slack" for a in _queued_alerts())
+    assert any("traffic blocked (conversion too fast)" in t for t in texts)
+    assert any("a postback was refused (policy rejected, HTTP 403)" in t for t in texts)
+    assert all(t.startswith("Relay · ") for t in texts)
+
+    # The worker sends queued alerts through the configured channel.
+    from app.worker import run_once
+
+    sent = []
+    monkeypatch.setattr(alerts, "send", lambda channel, settings, text: sent.append(channel))
+    while run_once():
+        pass
+    assert sent == ["slack", "slack"]
+
+
+def test_alerts_follow_the_chosen_events_and_cap_pause(client):
+    admin, adv, pub, advertiser, publisher, campaign, link, click = campaign_flow(client)
+    client.put(
+        "/alert-settings",
+        headers=admin,
+        json={
+            "telegram_bot_token": BOT_TOKEN,
+            "telegram_chat_id": "@relayalerts",
+            "events": ["caps"],
+        },
+    )
+    _campaign_settings(campaign["id"], cap_action="stop")
+    rules = client.get(f"/offers/{campaign['id']}/rules", headers=adv).json()
+    client.put(
+        f"/offers/{campaign['id']}/rules", headers=adv, json={**rules, "daily_conversions": 1}
+    )
+    assert postback(client, campaign, click, "C1").status_code == 201
+    fresh = client.get("/t/" + link["id"], follow_redirects=False)
+    click2 = parse_qs(urlsplit(fresh.headers["location"]).query)["click_id"][0]
+    assert postback(client, campaign, click2, "C2").json()["status"] == "pending"
+    alerts = _queued_alerts()
+    assert len(alerts) == 1 and alerts[0]["channel"] == "telegram"
+    assert "is paused: its conversion cap is full" in alerts[0]["text"]
+    # A paused campaign refuses clicks, but postback errors are not among the chosen events.
+    assert client.get("/t/" + link["id"], follow_redirects=False).status_code == 410
+    assert len(_queued_alerts()) == 1
+
+
+def _audit_details(action):
+    from sqlalchemy import select
+
+    from app.core.database import SessionLocal
+    from app.persistence.models import AuditEvent
+
+    with SessionLocal() as db:
+        return [e.detail for e in db.scalars(select(AuditEvent).where(AuditEvent.action == action))]
+
+
+def test_admin_can_log_in_as_a_partner_with_limits_and_an_audit_trail(client):
+    admin, adv, pub, advertiser, publisher, campaign, link, click = campaign_flow(client)
+    route = f"/users/{publisher['id']}/login-as"
+    assert client.post(route, headers=adv).status_code == 403
+    me = client.get("/me", headers=admin).json()
+    assert client.post(f"/users/{me['id']}/login-as", headers=admin).status_code == 404
+    opened = client.post(route, headers=admin)
+    assert opened.status_code == 200, opened.text
+    assert opened.json()["user"]["email"] == publisher["email"]
+    assert "refresh_token" not in opened.headers.get("set-cookie", "")
+    as_pub = {"Authorization": "Bearer " + opened.json()["access_token"]}
+    assert client.get("/me", headers=as_pub).json()["id"] == publisher["id"]
+    # Account-security actions stay with the real owner.
+    keys = client.post("/api-keys", headers=as_pub, json={"name": "x", "scopes": ["reports:read"]})
+    assert keys.status_code == 403 and "owner" in keys.text
+    assert client.post("/auth/logout-all", headers=as_pub).status_code == 403
+    # What the admin does as the partner is recorded under the admin.
+    other = client.post(
+        "/campaigns",
+        headers=adv,
+        json={
+            "name": "Second",
+            "destination_url": "https://brand.example/2",
+            "revenue": "1",
+            "payout": "1",
+        },
+    ).json()
+    assert (
+        client.post(f"/campaigns/{other['id']}/apply", headers=as_pub, json={}).status_code == 201
+    )
+    applied = _audit_details("campaign.applied")
+    assert any(f"[by admin {me['email']}]" in d for d in applied)
+    assert _audit_details("user.login_as") == [publisher["email"]]
+    # Disabling the partner ends the session.
+    client.patch(f"/users/{publisher['id']}", headers=admin, json={"active": False})
+    assert client.get("/me", headers=as_pub).status_code == 401
+    assert client.post(route, headers=admin).status_code == 409
+
+
+def test_agency_team_members_sign_in_to_the_agency_account(client):
+    from test_api import sign_in
+
+    admin, adv, pub, advertiser, publisher, campaign, link, click = campaign_flow(client)
+    agency, agency_headers = partner(client, admin, "affiliate", "agency")
+    member_body = {"email": "Riya@Agency.example", "password": "team-password-1234", "name": "Riya"}
+    assert client.post("/team", headers=admin, json=member_body).status_code == 403
+    assert (
+        client.post(
+            "/team", headers=agency_headers, json={**member_body, "email": publisher["email"]}
+        ).status_code
+        == 409
+    )
+    added = client.post("/team", headers=agency_headers, json=member_body)
+    assert added.status_code == 201, added.text
+    member = added.json()
+    assert member["email"] == "riya@agency.example" and "password" not in added.text
+    assert client.post("/team", headers=agency_headers, json=member_body).status_code == 409
+
+    login = client.post(
+        "/auth/login", json={"email": "riya@agency.example", "password": "team-password-1234"}
+    )
+    assert login.status_code == 200, login.text
+    assert login.json()["user"]["id"] == agency["id"]
+    assert login.json()["user"]["team_member"] == {"email": "riya@agency.example", "name": "Riya"}
+    riya = {"Authorization": "Bearer " + login.json()["access_token"]}
+    assert client.get("/me", headers=riya).json()["id"] == agency["id"]
+    assert client.get("/users", headers=riya).status_code == 200
+    assert client.get("/team", headers=riya).status_code == 403
+    assert any("[by team member riya@agency.example]" in d for d in _audit_details("auth.login"))
+    wrong = client.post(
+        "/auth/login", json={"email": "riya@agency.example", "password": "wrong-password-1234"}
+    )
+    assert wrong.status_code == 401
+
+    # A new password ends existing sessions; disabling blocks sign-in.
+    reset = client.put(
+        f"/team/{member['id']}/password",
+        headers=agency_headers,
+        json={"password": "new-password-12345"},
+    )
+    assert reset.status_code == 200
+    assert client.get("/me", headers=riya).status_code == 401
+    riya = sign_in(client, None, "riya@agency.example", "new-password-12345")
+    client.patch(f"/team/{member['id']}", headers=agency_headers, json={"active": False})
+    assert client.get("/me", headers=riya).status_code == 401
+    disabled = client.post(
+        "/auth/login", json={"email": "riya@agency.example", "password": "new-password-12345"}
+    )
+    assert disabled.status_code == 401
+    listed = client.get("/team", headers=agency_headers).json()
+    assert [(m["email"], m["active"]) for m in listed] == [("riya@agency.example", False)]
+    _, other_agency = partner(client, admin, "affiliate", "other-agency")
+    assert (
+        client.patch(
+            f"/team/{member['id']}", headers=other_agency, json={"active": True}
+        ).status_code
+        == 404
+    )
+    from test_api import signup_body
+
+    taken = client.post(
+        "/auth/register", json={**signup_body("Copycat"), "email": "riya@agency.example"}
+    )
+    assert taken.status_code == 409
+
+
+def test_account_managers_are_assigned_and_shown_to_partners(client):
+    admin, adv, pub, advertiser, publisher, campaign, link, click = campaign_flow(client)
+    manager, manager_headers = partner(client, admin, "staff", "manager")
+    route = f"/users/{publisher['id']}/manager"
+    assert client.put(route, headers=adv, json={"manager_id": manager["id"]}).status_code == 403
+    assert (
+        client.put(route, headers=admin, json={"manager_id": advertiser["id"]}).status_code == 422
+    )
+    assert client.put(route, headers=admin, json={"manager_id": manager["id"]}).status_code == 200
+    assert client.get("/account-manager", headers=pub).json() == {
+        "name": "",
+        "email": manager["email"],
+    }
+    assert client.get("/account-manager", headers=adv).json() is None
+    mine = client.get("/managed-partners", headers=manager_headers).json()
+    assert [u["id"] for u in mine] == [publisher["id"]] and mine[0]["manager_id"] == manager["id"]
+    assert client.get("/managed-partners", headers=pub).status_code == 403
+    client.put(route, headers=admin, json={"manager_id": None})
+    assert client.get("/account-manager", headers=pub).json() is None
+
+
+def test_postback_token_can_be_a_parameter_and_app_events_map_to_stages(client):
+    from app.core.database import SessionLocal
+    from app.persistence.models import Conversion
+
+    admin, adv, pub, advertiser, publisher, campaign, link, click = campaign_flow(client)
+    goal(client, adv, campaign, code="purchase", name="First purchase", payout="50")
+    token = client.get("/postback-settings", headers=admin).json()["url"].rsplit("/pb/", 1)[1]
+    assert client.get("/pb", params={"click_id": click, "txn_id": "APP1"}).status_code == 401
+    wrong = client.get("/pb", params={"token": "x" * 32, "click_id": click, "txn_id": "APP1"})
+    assert wrong.status_code == 401
+    # An attribution platform reports the install, then an in-app event by its own name.
+    install = client.get(
+        "/pb", params={"token": token, "click_id": click, "txn_id": "DEVICE1", "event": "install"}
+    )
+    assert install.status_code == 201, install.text
+    purchase = client.post(
+        "/pb",
+        json={
+            "security_token": token,
+            "click_id": click,
+            "txn_id": "DEVICE1",
+            "event": "af_purchase",
+        },
+    )
+    assert purchase.status_code == 201, purchase.text
+    with SessionLocal() as db:
+        stored = sorted(
+            (c.event_key, c.transaction_id)
+            for c in db.query(Conversion).filter_by(offer_id=campaign["id"])
+        )
+    assert stored == [("initial", "DEVICE1"), ("purchase", "DEVICE1")]
+    # An unknown app event is still refused rather than guessed.
+    unknown = client.get(
+        "/pb",
+        params={"token": token, "click_id": click, "txn_id": "DEVICE1", "event": "af_level_up"},
+    )
+    assert unknown.status_code in {404, 422}, unknown.text

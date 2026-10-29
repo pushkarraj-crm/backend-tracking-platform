@@ -119,6 +119,9 @@ class CatalogSettings(StrictModel):
     cap_action: Literal["refuse", "reject", "pending", "accept", "stop"] = "refuse"
     # Clicks the campaign cannot serve go to the same partner's link on this campaign.
     fallback_campaign_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
+    # CPS percentage base: the order value, or the commission the advertiser reports
+    # (revenue share: the network earns that commission, the partner gets the percentage).
+    percent_of: Literal["sale", "commission"] = "sale"
 
     @model_validator(mode="after")
     def valid(self):

@@ -206,3 +206,11 @@ def reserve(
                 f"{cap.name}: {current} of {cap.amount} ({policy(offer).cap_alert_percent}% threshold).",
                 offer.id,
             )
+            from app.features.alerts.router import alert
+
+            alert(
+                db,
+                offer.workspace_id,
+                "caps",
+                f'⚠️ {offer.name}: cap "{cap.name}" is at {current} of {cap.amount}.',
+            )
