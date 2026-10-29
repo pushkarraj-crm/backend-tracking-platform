@@ -66,29 +66,6 @@ def record_click(db, request, link_id, sub_id=None):
         raise HTTPException(422, "Invalid placement sub ID")
     at = datetime.now(timezone.utc)
     rules = Rules.model_validate(offer.tracking_rules)
-    if rules.unique_click_hours and metadata.get("ip_hash"):
-        earlier = db.scalar(
-            select(Click)
-            .where(
-                Click.workspace_id == link.workspace_id,
-                Click.link_id == link.id,
-                Click.ip_hash == metadata["ip_hash"],
-                Click.created_at >= at - timedelta(hours=rules.unique_click_hours),
-            )
-            .order_by(Click.created_at.desc())
-            .limit(1)
-        )
-        if earlier:
-            target = destination(
-                db,
-                offer,
-                link,
-                earlier,
-                request.query_params.get("url"),
-                request.query_params.get("destination_id"),
-                parameters(request.query_params, PASSTHROUGH_PARAMETERS),
-            )
-            return link, offer, earlier, target
     click = Click(
         id=identifier(),
         workspace_id=link.workspace_id,
@@ -122,6 +99,31 @@ def record_click(db, request, link_id, sub_id=None):
             if rule.action == "reject":
                 raise HTTPException(403, "Traffic rejected by campaign rule")
             break
+    # Reusing attribution never authorizes new traffic: evaluate this request's
+    # source and rules first, without changing the original click's attributes.
+    if rules.unique_click_hours and metadata.get("ip_hash"):
+        earlier = db.scalar(
+            select(Click)
+            .where(
+                Click.workspace_id == link.workspace_id,
+                Click.link_id == link.id,
+                Click.ip_hash == metadata["ip_hash"],
+                Click.created_at >= at - timedelta(hours=rules.unique_click_hours),
+            )
+            .order_by(Click.created_at.desc())
+            .limit(1)
+        )
+        if earlier:
+            target = destination(
+                db,
+                offer,
+                link,
+                earlier,
+                request.query_params.get("url"),
+                request.query_params.get("destination_id"),
+                parameters(request.query_params, PASSTHROUGH_PARAMETERS),
+            )
+            return link, offer, earlier, target
     target = destination(
         db,
         offer,

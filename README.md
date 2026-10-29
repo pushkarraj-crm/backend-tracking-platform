@@ -5,6 +5,9 @@ Backend for a multi-tenant affiliate marketing SaaS deployed on DigitalOcean. Th
 See [backend architecture](docs/backend-architecture.md) for the feature packages,
 router registration, permissions, middleware and dependency boundaries.
 
+For the Vercel-to-backend proxy, configure the shared server-only secret described
+in [security fixes and deployment setup](docs/security-fixes-2026-10-29.md) before deploying.
+
 ## Local operation
 
 The local PostgreSQL instance is already initialized on `127.0.0.1:5433`. Credentials are in the ignored `.env`. On later sessions:

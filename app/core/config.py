@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     cookie_samesite: Literal["strict", "lax", "none"] = "strict"
     require_email_verification: bool = False
     jwt_previous_secret: str = ""
+    proxy_ip_secret: str = Field(default="", repr=False)
     allow_registration: bool = True
     smtp_host: str = ""
     smtp_port: int = 587
@@ -69,6 +70,8 @@ class Settings(BaseSettings):
     def production_config(self):
         import re
 
+        if self.proxy_ip_secret and len(self.proxy_ip_secret) < 32:
+            raise ValueError("PROXY_IP_SECRET must have at least 32 characters")
         if not re.fullmatch(r"[a-z0-9]+(?:[.-][a-z0-9]+)*", self.company_base_domain):
             raise ValueError("COMPANY_BASE_DOMAIN must be a hostname without scheme or port")
         if self.company_databases:

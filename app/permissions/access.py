@@ -107,7 +107,7 @@ def employee_permission(user, request):
         return
     if path.startswith("/campaign-applications"):
         permission = "campaigns:read" if read else "applications:review"
-    elif path.startswith(("/campaigns", "/offers", "/links")):
+    elif path == "/targets" or path.startswith(("/campaigns", "/offers", "/links")):
         permission = "campaigns:read" if read else "campaigns:write"
     elif path.startswith("/users"):
         permission = "partners:read" if read else "partners:write"
@@ -121,7 +121,7 @@ def employee_permission(user, request):
         permission = "callbacks:read" if read else "callbacks:write"
     elif path.startswith("/publisher-invoices"):
         permission = "invoices:read" if read else None
-    elif path.startswith("/fraud/"):
+    elif path == "/blocked-sources" or path.startswith(("/fraud/", "/blocked-sources/")):
         permission = "fraud:read" if read else "fraud:review"
     elif path.startswith(("/deliveries", "/callback-deliveries")):
         permission = "deliveries:read" if read else "deliveries:retry"

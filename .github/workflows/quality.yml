@@ -42,6 +42,7 @@ jobs:
       - run: ruff format --check app tests scripts migrations
       - run: python -m pytest -q
       - run: pip-audit --disable-pip --no-deps -r requirements-runtime-lock.txt
+      - run: pip-audit --disable-pip --no-deps -r requirements-lock.txt
   container:
     runs-on: ubuntu-latest
     timeout-minutes: 15

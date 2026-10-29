@@ -13,6 +13,7 @@ from redis.exceptions import RedisError
 from starlette.responses import JSONResponse
 
 from app.core.config import get_settings
+from app.middleware.proxy import restore_client
 
 logger = logging.getLogger("affiliate.requests")
 requests_total = Counter(
@@ -20,6 +21,7 @@ requests_total = Counter(
 )
 duration = Histogram("affiliate_http_seconds", "Request duration", ["route"])
 buckets = OrderedDict()
+HTTP_METHODS = {"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "CONNECT", "TRACE"}
 LUA_LIMIT = """
 local current = redis.call('INCR', KEYS[1])
 if current == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end
@@ -105,6 +107,10 @@ class SecurityMiddleware:
             await response(scope, receive, secure_send)
 
         try:
+            try:
+                scope = restore_client(scope, self.settings.proxy_ip_secret)
+            except ValueError:
+                return await reject(400, "Invalid proxy identity")
             path = scope["path"]
             exempt = path in {"/health", "/health/ready", "/metrics"}
             if not exempt:
@@ -178,13 +184,14 @@ class SecurityMiddleware:
         finally:
             route = getattr(scope.get("route"), "path", "unmatched")
             elapsed = time.monotonic() - started
-            requests_total.labels(scope["method"], route, str(response_status)).inc()
+            method = scope["method"] if scope["method"] in HTTP_METHODS else "OTHER"
+            requests_total.labels(method, route, str(response_status)).inc()
             duration.labels(route).observe(elapsed)
             logger.info(
                 json.dumps(
                     {
                         "request_id": request_id,
-                        "method": scope["method"],
+                        "method": method,
                         "route": route,
                         "status": response_status,
                         "duration_ms": round(elapsed * 1000, 2),
