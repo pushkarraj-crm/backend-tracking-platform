@@ -106,6 +106,34 @@ def track_by_number(
     return track(link.id, request, db, sub_id)
 
 
+def fallback_campaign_link(db, offer, link, request):
+    """The same partner's link on the campaign's fallback campaign, followed at most once."""
+    from types import SimpleNamespace
+    from urllib.parse import urlencode
+
+    from app.features.campaigns.policy import policy
+    from app.features.domains.router import link_base
+
+    target_id = policy(offer).fallback_campaign_id
+    if not target_id or target_id == offer.id or request.query_params.get("relay_fallback"):
+        return None
+    backup = db.scalar(
+        select(TrackingLink)
+        .join(Offer, Offer.id == TrackingLink.offer_id)
+        .where(
+            TrackingLink.workspace_id == offer.workspace_id,
+            TrackingLink.offer_id == target_id,
+            TrackingLink.affiliate_id == link.affiliate_id,
+            Offer.active.is_(True),
+        )
+    )
+    if not backup:
+        return None
+    query = urlencode([*request.query_params.multi_items(), ("relay_fallback", "1")])
+    base = link_base(db, SimpleNamespace(workspace_id=offer.workspace_id), None)
+    return f"{base}/t/{backup.id}?{query}"
+
+
 @router.get("/t/{link_id}")
 def track(link_id: str, request: Request, db: DB, sub_id: str | None = Query(None, max_length=100)):
     from app.features.campaigns.policy import policy
@@ -128,6 +156,9 @@ def track(link_id: str, request: Request, db: DB, sub_id: str | None = Query(Non
         db.rollback()
         link = db.get(TrackingLink, link_id)
         offer = db.get(Offer, link.offer_id) if link else None
+        backup = fallback_campaign_link(db, offer, link, request) if offer else None
+        if backup:
+            return RedirectResponse(backup, status_code=302)
         fallback = policy(offer).fallback_url if offer else None
         if not fallback:
             raise

@@ -177,10 +177,34 @@ def ingest(db, offer, body, offline=False, browser=False):
             )
         )
     at = datetime.now(timezone.utc)
-    reserve(db, offer, "conversions", at, revenue=revenue)
-    reserve_period_caps(
-        db, offer, link.affiliate_id, "conversion", at, body.event_key, revenue, payout
-    )
+    from app.features.campaigns.caps import conversion_cap_full
+
+    action = settings.cap_action
+    if action != "refuse" and conversion_cap_full(
+        db, offer, link.affiliate_id, at, body.event_key, revenue, payout
+    ):
+        # The cap stays full: this conversion is recorded without being counted against it.
+        if action == "reject":
+            state = "rejected"
+        elif action in {"pending", "stop"} and state != "rejected":
+            state = "pending"
+        if action == "stop" and offer.active:
+            from app.features.accounts.notifications import notify_admins
+
+            offer.active = False
+            notify_admins(
+                db,
+                offer.workspace_id,
+                "campaign_cap_reached",
+                f"{offer.name} paused: conversion cap reached",
+                "New traffic is stopped. Raise the cap and resume the campaign to continue.",
+                offer.id,
+            )
+    else:
+        reserve(db, offer, "conversions", at, revenue=revenue)
+        reserve_period_caps(
+            db, offer, link.affiliate_id, "conversion", at, body.event_key, revenue, payout
+        )
     conversion = Conversion(
         workspace_id=offer.workspace_id,
         offer_id=offer.id,

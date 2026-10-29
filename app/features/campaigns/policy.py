@@ -114,6 +114,11 @@ class CatalogSettings(StrictModel):
     initial_repeatable: bool = False
     initial_auto_approve: bool = False
     fallback_url: HttpUrl | None = None
+    # What happens to a conversion once a conversion cap is full. "refuse" keeps the
+    # original behaviour: the postback is refused and nothing is recorded.
+    cap_action: Literal["refuse", "reject", "pending", "accept", "stop"] = "refuse"
+    # Clicks the campaign cannot serve go to the same partner's link on this campaign.
+    fallback_campaign_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
 
     @model_validator(mode="after")
     def valid(self):

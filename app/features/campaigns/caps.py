@@ -74,6 +74,60 @@ def historical_usage(db, cap, start, end):
     return Decimal(db.scalar(query) or 0)
 
 
+def conversion_cap_full(db, offer, publisher_id, at, event_key, revenue, payout):
+    """Read-only: would one more conversion exceed a campaign or period cap?
+
+    reserve() must not be used to find out, because a full campaign cap rolls back
+    the whole transaction.
+    """
+    from app.features.tracking.rules import Rules
+    from app.persistence.models import OfferCounter
+
+    rules = Rules.model_validate(offer.tracking_rules)
+    for period in (at.astimezone(timezone.utc).date().isoformat(), "total"):
+        counter = db.scalar(
+            select(OfferCounter).where(
+                OfferCounter.workspace_id == offer.workspace_id,
+                OfferCounter.offer_id == offer.id,
+                OfferCounter.period == period,
+            )
+        )
+        count = counter.conversions if counter else 0
+        spent = Decimal(counter.revenue if counter else 0)
+        prefix = "total_" if period == "total" else "daily_"
+        limit, budget = getattr(rules, prefix + "conversions"), getattr(rules, prefix + "revenue")
+        if (limit is not None and count + 1 > limit) or (
+            budget is not None and spent + Decimal(revenue) > budget
+        ):
+            return True
+    caps = db.scalars(
+        select(PeriodCap).where(
+            PeriodCap.workspace_id == offer.workspace_id,
+            PeriodCap.offer_id == offer.id,
+            PeriodCap.active.is_(True),
+            PeriodCap.metric.in_(["conversions", "revenue", "payout"]),
+            or_(PeriodCap.publisher_id.is_(None), PeriodCap.publisher_id == publisher_id),
+            or_(PeriodCap.event_key.is_(None), PeriodCap.event_key == event_key),
+        )
+    )
+    for cap in caps:
+        key, start, end = bucket(cap, at)
+        used = db.scalar(
+            select(PeriodCapCounter.amount).where(
+                PeriodCapCounter.workspace_id == offer.workspace_id,
+                PeriodCapCounter.cap_id == cap.id,
+                PeriodCapCounter.bucket == key,
+            )
+        )
+        used = historical_usage(db, cap, start, end) if used is None else used
+        delta = {"conversions": Decimal(1), "revenue": Decimal(revenue)}.get(
+            cap.metric, Decimal(payout)
+        )
+        if used + delta > cap.amount:
+            return True
+    return False
+
+
 def reserve(
     db, offer, publisher_id, kind, at, event_key="initial", revenue=Decimal(0), payout=Decimal(0)
 ):

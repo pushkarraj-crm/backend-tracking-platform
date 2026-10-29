@@ -124,7 +124,11 @@ each a separate project to schedule after the list above unless the owner reorde
    confirms them. Shopify snippets use the Web Pixels API; checkout event names follow
    Offer18's guide and still need testing on a live store.
 9. Capping over-actions (pending, accept, reject, stop campaign, fallback) and fallback
-   to another campaign.
+   to another campaign. — done 2026-10-29. Campaign setting `cap_action`: refuse (default,
+   the old 409/429), reject, pending, accept (recorded but not counted), or stop (held as
+   pending, campaign paused, admins notified). Setting `fallback_campaign_id` sends clicks
+   the campaign cannot take (targeting, schedule, click cap) to the same partner's link on
+   that campaign, once (`relay_fallback=1` stops loops); otherwise `fallback_url` applies.
 10. Revenue-share model: commission derived from the advertiser's reported payout.
 11. Telegram and Slack alerts for caps, postback errors and fraud.
 12. Login as partner, agency team logins and account managers.

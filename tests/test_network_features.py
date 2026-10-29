@@ -1388,3 +1388,89 @@ def test_store_sales_from_the_browser_stay_pending_and_send_cors(client):
 
     sdk = client.get("/sdk/relay.js").text
     assert "remember:" in sdk and "conversion:" in sdk and "text/plain" in sdk
+
+
+def _campaign_settings(campaign_id, **values):
+    from app.core.database import SessionLocal
+    from app.persistence.models import Offer
+
+    with SessionLocal() as db:
+        offer = db.get(Offer, campaign_id)
+        offer.catalog_settings = {**offer.catalog_settings, **values}
+        db.commit()
+
+
+@pytest.mark.parametrize(
+    "action,second",
+    [
+        ("refuse", 409),
+        ("reject", "rejected"),
+        ("pending", "pending"),
+        ("accept", "approved"),
+        ("stop", "pending"),
+    ],
+)
+def test_cap_action_decides_what_happens_to_conversions_over_the_cap(client, action, second):
+    from app.core.database import SessionLocal
+    from app.persistence.models import Offer
+
+    admin, adv, pub, advertiser, publisher, campaign, link, click = campaign_flow(client)
+    _campaign_settings(campaign["id"], cap_action=action, initial_auto_approve=True)
+    rules = client.get(f"/offers/{campaign['id']}/rules", headers=adv).json()
+    client.put(
+        f"/offers/{campaign['id']}/rules", headers=adv, json={**rules, "daily_conversions": 1}
+    )
+    assert postback(client, campaign, click, "CAP1").json()["status"] == "approved"
+    fresh = client.get("/t/" + link["id"], follow_redirects=False)
+    click2 = parse_qs(urlsplit(fresh.headers["location"]).query)["click_id"][0]
+    response = postback(client, campaign, click2, "CAP2")
+    if second == 409:
+        assert response.status_code == 409
+    else:
+        assert response.status_code == 201 and response.json()["status"] == second, response.text
+    with SessionLocal() as db:
+        assert db.get(Offer, campaign["id"]).active is (action != "stop")
+    if action == "stop":
+        titles = [n["title"] for n in client.get("/notifications", headers=admin).json()]
+        assert any("paused: conversion cap reached" in t for t in titles)
+
+
+def test_unservable_clicks_fall_back_to_the_partners_link_on_another_campaign_once(client):
+    admin, adv, pub, advertiser, publisher, campaign, link, click = campaign_flow(client)
+    backup = client.post(
+        "/campaigns",
+        headers=adv,
+        json={
+            "name": "Backup",
+            "destination_url": "https://brand.example/backup",
+            "revenue": "1",
+            "payout": "1",
+        },
+    ).json()
+    application = client.post(
+        f"/campaigns/{backup['id']}/apply", headers=pub, json={"message": "x"}
+    )
+    client.patch(
+        f"/campaign-applications/{application.json()['id']}",
+        headers=adv,
+        json={"status": "approved"},
+    )
+    backup_link = client.post(f"/campaigns/{backup['id']}/link", headers=pub).json()
+    for campaign_id in (campaign["id"], backup["id"]):
+        rules = client.get(f"/offers/{campaign_id}/rules", headers=adv).json()
+        client.put(f"/offers/{campaign_id}/rules", headers=adv, json={**rules, "countries": ["US"]})
+    _campaign_settings(campaign["id"], fallback_campaign_id=backup["id"])
+    first = client.get("/t/" + link["id"], params={"aff_sub1": "story"}, follow_redirects=False)
+    assert first.status_code == 302
+    hop = urlsplit(first.headers["location"])
+    assert hop.path == "/t/" + backup_link["id"] and "relay_fallback=1" in hop.query
+    assert "aff_sub1=story" in hop.query
+    # The backup campaign is also out of targeting; the fallback is never followed twice.
+    _campaign_settings(backup["id"], fallback_campaign_id=campaign["id"])
+    assert client.get(hop.path + "?" + hop.query, follow_redirects=False).status_code == 403
+    rules = client.get(f"/offers/{backup['id']}/rules", headers=adv).json()
+    client.put(f"/offers/{backup['id']}/rules", headers=adv, json={**rules, "countries": []})
+    landed = client.get(hop.path + "?" + hop.query, follow_redirects=False)
+    assert landed.status_code == 302 and landed.headers["location"].startswith(
+        "https://brand.example/backup"
+    )
