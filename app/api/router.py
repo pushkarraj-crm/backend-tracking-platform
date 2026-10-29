@@ -22,6 +22,7 @@ from app.features.portals.router import router as portals_router
 from app.features.reporting.router import router as reporting_router
 from app.features.reporting.summary import router as summary_router
 from app.features.sources.router import router as sources_router
+from app.features.stores.router import router as stores_router
 from app.features.tools.automation import router as automation_router
 from app.features.tools.router import router as network_tools_router
 from app.features.tools.smart_links import router as smart_links_router
@@ -58,3 +59,4 @@ router.include_router(automation_router)
 router.include_router(influencer_router)
 router.include_router(sources_router)
 router.include_router(coupons_router)
+router.include_router(stores_router)

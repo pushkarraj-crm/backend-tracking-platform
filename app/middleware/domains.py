@@ -36,7 +36,7 @@ class DomainHostMiddleware:
         ):
             return await self.app(scope, receive, send)
         if scope["path"] == "/c" or scope["path"].startswith(
-            ("/t/", "/i/", "/capture/", "/s/", "/l/")
+            ("/t/", "/i/", "/capture/", "/s/", "/l/", "/wc/")
         ):
 
             def permitted():

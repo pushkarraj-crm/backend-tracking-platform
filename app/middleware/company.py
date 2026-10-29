@@ -32,7 +32,8 @@ class CompanyMiddleware:
             slug = await run_in_threadpool(certificate_company)
         # Public S2S callbacks and tracking links have an explicit company prefix.
         match = re.fullmatch(
-            r"/c/([a-z0-9-]{1,63})(/c|/(?:t/|i/|capture/|s/|l/|postbacks/|pb/|billing/).*)", path
+            r"/c/([a-z0-9-]{1,63})(/c|/(?:t/|i/|capture/|s/|l/|postbacks/|pb/|wc/|billing/).*)",
+            path,
         )
         if match:
             if slug and slug != match[1]:
@@ -48,7 +49,7 @@ class CompanyMiddleware:
             return await JSONResponse({"detail": "Invalid host"}, 400)(scope, receive, send)
         if not slug and (
             scope["path"] == "/c"
-            or scope["path"].startswith(("/t/", "/i/", "/capture/", "/s/", "/l/"))
+            or scope["path"].startswith(("/t/", "/i/", "/capture/", "/s/", "/l/", "/wc/"))
         ):
 
             def public_domain_company():

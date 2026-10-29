@@ -1339,3 +1339,52 @@ def test_creator_coupons_belong_to_the_creator(client):
     assert sale.status_code == 201, sale.text
     summary = client.get("/influencer/summary", headers=me).json()
     assert (summary["deals"][0]["sales"], summary["deals"][0]["earnings"]) == (1, "45.0000")
+
+
+def test_store_sales_from_the_browser_stay_pending_and_send_cors(client):
+    import json as jsonlib
+    from app.core.database import SessionLocal
+    from app.persistence.models import Offer
+
+    admin, adv, pub, advertiser, publisher, campaign, link, click = campaign_flow(client)
+    with SessionLocal() as db:
+        offer = db.get(Offer, campaign["id"])
+        offer.catalog_settings = {**offer.catalog_settings, "initial_auto_approve": True}
+        db.commit()
+    settings = client.get("/web-conversion-settings", headers=admin).json()
+    assert client.get("/web-conversion-settings", headers=admin).json() == settings
+    assert client.get("/web-conversion-settings", headers=pub).status_code == 403
+    assert settings["sdk_url"].endswith("/sdk/relay.js")
+    path = "/wc/" + settings["endpoint"].rsplit("/wc/", 1)[1]
+    store = {"Origin": "https://shop.example", "Content-Type": "text/plain"}
+
+    def send(body, key_path=path):
+        return client.post(key_path, headers=store, content=jsonlib.dumps(body))
+
+    sale = send({"click_id": click, "txn_id": "SHOP-1", "status": "approved", "amount": "999"})
+    assert sale.status_code == 201, sale.text
+    assert sale.json()["status"] == "pending"  # browser sales wait despite auto-approve
+    assert sale.headers["access-control-allow-origin"] == "https://shop.example"
+    # The same campaign auto-approves server postbacks, so the pending state above is the browser rule.
+    fresh = client.get("/t/" + link["id"], follow_redirects=False)
+    fresh_click = parse_qs(urlsplit(fresh.headers["location"]).query)["click_id"][0]
+    pb = client.get("/postback-settings", headers=admin).json()["url"]
+    server = client.get(
+        "/pb/" + pb.rsplit("/pb/", 1)[1], params={"click_id": fresh_click, "txn_id": "S1"}
+    )
+    assert server.json()["status"] == "approved", server.text
+    again = send({"click_id": click, "txn_id": "SHOP-1", "amount": "999"})
+    assert again.status_code == 200 and again.json()["duplicate"] is True
+    missing = send({"click_id": click})
+    assert missing.status_code == 422 and missing.headers["access-control-allow-origin"]
+    assert send({"click_id": click, "txn_id": "X"}, "/wc/" + "z" * 24).status_code == 401
+    bad = client.post(path, headers=store, content="not json")
+    assert bad.status_code == 422
+
+    coupon = {"campaign_id": campaign["id"], "partner_id": publisher["id"], "code": "SHOP10"}
+    assert client.post("/coupons", headers=admin, json=coupon).status_code == 201
+    by_code = send({"coupon": "shop10", "txn_id": "SHOP-2", "amount": "500"})
+    assert by_code.status_code == 201 and by_code.json()["status"] == "pending", by_code.text
+
+    sdk = client.get("/sdk/relay.js").text
+    assert "remember:" in sdk and "conversion:" in sdk and "text/plain" in sdk

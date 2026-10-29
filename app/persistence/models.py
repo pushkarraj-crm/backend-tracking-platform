@@ -58,6 +58,8 @@ class Workspace(Base):
     # Global postback secret: hash for lookup, encrypted copy so admins can view the URL.
     postback_token_hash: Mapped[str | None] = mapped_column(String(64), unique=True)
     postback_token: Mapped[str | None] = mapped_column(Text)
+    # Public key for browser sale tracking on stores; not a secret, unlike the postback token.
+    web_key: Mapped[str | None] = mapped_column(String(32), unique=True)
     usage_types: Mapped[list[str]] = mapped_column(JSON, default=list, server_default="[]")
     country: Mapped[str | None] = mapped_column(String(2))
     mobile: Mapped[str | None] = mapped_column(String(20))

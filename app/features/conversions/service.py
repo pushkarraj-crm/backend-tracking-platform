@@ -41,7 +41,7 @@ def existing_conversion(db, offer, body):
     )
 
 
-def ingest(db, offer, body, offline=False):
+def ingest(db, offer, body, offline=False, browser=False):
     from app.features.campaigns.caps import reserve as reserve_period_caps
     from app.features.tracking.rules import Rules, reject_fraud, reserve
 
@@ -155,6 +155,9 @@ def ingest(db, offer, body, offline=False):
         if matches(rule.conditions, values):
             state = {"approve": "approved", "reject": "rejected", "pending": "pending"}[rule.action]
             break
+    if browser and state == "approved":
+        # Anyone can call a public browser endpoint, so its sales wait for confirmation.
+        state = "pending"
     from app.features.sources.router import blocked_preset
     from app.persistence.models import FraudEvent
 

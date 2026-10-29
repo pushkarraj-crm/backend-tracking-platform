@@ -129,6 +129,7 @@ class SecurityMiddleware:
                             "/c/",
                             "/postbacks/",
                             "/pb/",
+                            "/wc/",
                             "/billing/webhook",
                         )
                     )

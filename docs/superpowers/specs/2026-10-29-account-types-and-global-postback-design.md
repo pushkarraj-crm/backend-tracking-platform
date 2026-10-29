@@ -117,7 +117,12 @@ each a separate project to schedule after the list above unless the owner reorde
    A partner's coupon wins over another partner's click. MIS upload does not yet read
    a coupon column.
 8. Shopify and Indian checkouts (Shiprocket, GoKwik, Razorpay Magic Checkout, Flexype)
-   and WooCommerce, via a conversion pixel / Web SDK.
+   and WooCommerce, via a conversion pixel / Web SDK. — done 2026-10-29 except Razorpay
+   Magic Checkout (its purchase event needs a listener we could not verify). Stores post to
+   a public per-account endpoint `/wc/{web_key}` (text/plain JSON, no CORS preflight);
+   browser-reported sales are always pending until a postback, MIS upload or reviewer
+   confirms them. Shopify snippets use the Web Pixels API; checkout event names follow
+   Offer18's guide and still need testing on a live store.
 9. Capping over-actions (pending, accept, reject, stop campaign, fallback) and fallback
    to another campaign.
 10. Revenue-share model: commission derived from the advertiser's reported payout.

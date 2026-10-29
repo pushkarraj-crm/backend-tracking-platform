@@ -31,7 +31,7 @@ def postback(
     return accept_postback(db, offer, body, request)
 
 
-def accept_postback(db, offer, body, request, status=None, offline=False):
+def accept_postback(db, offer, body, request, status=None, offline=False, browser=False):
     """Shared by per-campaign and global postbacks: policy, ingest, receipts, status updates."""
     import ipaddress
 
@@ -72,7 +72,7 @@ def accept_postback(db, offer, body, request, status=None, offline=False):
             if not permitted:
                 raise HTTPException(403, "Advertiser postback IP is not permitted")
         try:
-            conversion, duplicate = ingest(db, offer, body, offline=offline)
+            conversion, duplicate = ingest(db, offer, body, offline=offline, browser=browser)
             db.flush()
         except IntegrityError:
             db.rollback()
@@ -132,10 +132,6 @@ async def global_postback(token: str, request: Request, db: DB):
 
 
 def receive_global_postback(db, token, values, request):
-    from pydantic import ValidationError
-
-    from app.persistence.network_models import CampaignEvent
-
     workspace = (
         db.scalar(select(Workspace).where(Workspace.postback_token_hash == key_hash(token)))
         if 16 <= len(token) <= 128
@@ -143,7 +139,15 @@ def receive_global_postback(db, token, values, request):
     )
     if not workspace:
         raise HTTPException(401, "Invalid postback credentials")
+    return record_values(db, workspace, values, request)
+
+
+def record_values(db, workspace, values, request, browser=False):
+    """Shared by the server postback and the browser endpoint: click or coupon, then ingest."""
+    from pydantic import ValidationError
+
     from app.features.coupons.router import coupon_click, usable_coupon
+    from app.persistence.network_models import CampaignEvent
 
     click = db.scalar(
         select(Click).where(
@@ -189,7 +193,8 @@ def receive_global_postback(db, token, values, request):
         )
     # Other platforms often send an amount on every event; it only prices CPS events.
     amount = values.get("amount") if model == "CPS" else None
-    status = values.get("status", "").lower() or None
+    # Browsers cannot set a status; their sales stay pending until confirmed.
+    status = None if browser else values.get("status", "").lower() or None
     if status not in {None, "approved", "rejected", "pending"}:
         raise HTTPException(422, "status must be approved, rejected or pending")
     try:
@@ -208,7 +213,7 @@ def receive_global_postback(db, token, values, request):
         )
     except ValidationError as error:
         raise HTTPException(422, "; ".join(e["msg"] for e in error.errors())) from None
-    result = accept_postback(db, offer, body, request, status, offline=by_coupon)
+    result = accept_postback(db, offer, body, request, status, offline=by_coupon, browser=browser)
     if by_coupon and isinstance(result, dict):  # a new sale, not a repeated postback
         from sqlalchemy import update
 

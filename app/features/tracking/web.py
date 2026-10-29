@@ -102,7 +102,41 @@ def capture(
 SDK = r"""/* Relay Web Tracking v1. No conversion secret belongs in a browser. */
 (function (root) {
   'use strict';
+  var STORE = 'relay_click';
+  function storedClick() {
+    try {
+      var saved = JSON.parse(root.localStorage.getItem(STORE) || 'null');
+      if (saved && /^[a-f0-9]{32}$/.test(saved.id) && Date.now() - saved.at < saved.days * 864e5) return saved.id;
+    } catch (e) {}
+    return null;
+  }
   root.RelayTracking = Object.freeze({
+    /* Every store page: keep Relay's click ID in this site's own storage (no third-party cookies). */
+    remember: function (options) {
+      var param = (options && options.param) || 'click_id';
+      var days = Math.min(Math.max(Number(options && options.days) || 30, 1), 90);
+      var value = new URL(root.location.href).searchParams.get(param);
+      if (!value || !/^[a-f0-9]{32}$/.test(value)) return storedClick();
+      try { root.localStorage.setItem(STORE, JSON.stringify({id: value, at: Date.now(), days: days})); } catch (e) {}
+      return value;
+    },
+    /* Thank-you page: report the order. Relay records it as pending until it is confirmed. */
+    conversion: async function (options) {
+      if (!options || !options.endpoint || !options.orderId) throw new Error('endpoint and orderId are required');
+      var endpoint = new URL(options.endpoint);
+      if (endpoint.protocol !== 'https:' || !/\/wc\/[A-Za-z0-9_-]{16,64}$/.test(endpoint.pathname)) throw new Error('Use your HTTPS store endpoint');
+      var click = options.clickId || storedClick();
+      if (!click && !options.coupon) return {tracked:false,reason:'no_click_or_coupon'};
+      var body = {txn_id: String(options.orderId)};
+      if (click) body.click_id = click;
+      if (options.coupon) body.coupon = String(options.coupon);
+      if (options.amount != null && options.amount !== '') body.amount = String(options.amount);
+      if (options.currency) body.currency = String(options.currency);
+      if (options.event) body.event = String(options.event);
+      /* text/plain keeps this a simple request: no CORS preflight is needed. */
+      var response = await root.fetch(endpoint.toString(), {method:'POST', mode:'cors', credentials:'omit', keepalive:true, headers:{'Content-Type':'text/plain'}, body: JSON.stringify(body)});
+      return {tracked: response.ok, status: response.status};
+    },
     capture: async function (options) {
       if (!options || options.consent !== true) return {tracked:false,reason:'consent_required'};
       var endpoint = new URL(options.captureUrl);
